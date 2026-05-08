@@ -368,12 +368,14 @@ def _export_group_worker(
                         data_lists["value"].extend(data.values)
                         if event_id is not None:
                             data_lists["event_id"].extend([event_id] * n)
-                        # Always include all DSS path parts A-E
-                        for part in ["A", "B", "C", "D", "E"]:
+                        # Include DSS path parts based on include_parts parameter
+                        # Always include required parts A, B, C
+                        required_parts = ["A", "B", "C"]
+                        for part in required_parts:
                             data_lists[part].extend([parts[part]] * n)
-                        # Also include any additional parts from include_parts
+                        # Include additional parts from include_parts
                         for part in include_parts:
-                            if part not in ["A", "B", "C", "D", "E"]:
+                            if part not in required_parts:
                                 data_lists[part].extend([parts[part]] * n)
                     elif record_path in table_read_plans:
                         # Table record
@@ -383,13 +385,16 @@ def _export_group_worker(
 
                         # Add DSS path parts as constant columns
                         n = len(table_data.dataframe)
-                        for part in ["A", "B", "C", "D", "E"]:
+                        # Always include required parts A, B, C
+                        required_parts = ["A", "B", "C"]
+                        for part in required_parts:
                             table_data.dataframe[part] = parts[part]
                         if event_id is not None:
                             table_data.dataframe["event_id"] = event_id
+                        # Include additional parts from include_parts
                         for part in include_parts:
                             if (
-                                part not in ["A", "B", "C", "D", "E"]
+                                part not in required_parts
                                 and part not in table_data.dataframe.columns
                             ):
                                 table_data.dataframe[part] = parts[part]
@@ -453,7 +458,7 @@ def run(
         output_path: Output file path for Parquet file
         groupby: DSS path part to group by (default: "F")
         strip_suffix: Strip version suffix from group keys (default: True)
-        include_parts: DSS path parts to include as columns (default: ["B", "C"])
+        include_parts: DSS path parts to include as columns (default: ["E", "F"])
         group_workers: Number of workers for group export parallelization (default: 4)
         dss_workers: Number of workers for DSS file parallelization (default: 1)
         event_id: Optional event ID to include in output
@@ -464,7 +469,7 @@ def run(
         Manifest dict with export results
     """
     if include_parts is None:
-        include_parts = ["B", "C"]
+        include_parts = ["E", "F"]
 
     # Set global debug level for HecDss library (0 = minimal output, 1 = verbose)
     HecDss.set_global_debug_level(0 if suppress_dss_output else 1)

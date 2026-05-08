@@ -169,8 +169,8 @@ def _main_impl() -> int:
     dss_to_pq.add_argument(
         "--include-parts",
         nargs="+",
-        default=["B", "C"],
-        help="DSS path parts to include as columns (default: B C D E)",
+        default=["E", "F"],
+        help="Additional DSS path parts to include beyond required A, B, C (default: E F; D is always excluded and auto-generated on import)",
     )
     dss_to_pq.add_argument(
         "--group-workers",
@@ -257,7 +257,7 @@ def _main_impl() -> int:
             args.output = None
             args.groupby = "F"
             args.no_strip_suffix = False
-            args.include_parts = ["B", "C"]
+            args.include_parts = ["E", "F"]
             args.group_workers = 4
             args.dss_workers = 1
             args.event_id = None
@@ -274,7 +274,7 @@ def _main_impl() -> int:
             parser_legacy.add_argument("-o", "--output", default=None)
             parser_legacy.add_argument("--groupby", default="F")
             parser_legacy.add_argument("--no-strip-suffix", action="store_true")
-            parser_legacy.add_argument("--include-parts", nargs="+", default=["B", "C"])
+            parser_legacy.add_argument("--include-parts", nargs="+", default=["E", "F"])
             parser_legacy.add_argument("--group-workers", type=int, default=4)
             parser_legacy.add_argument("--dss-workers", type=int, default=1)
             parser_legacy.add_argument("--event-id", type=int, default=None)

@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DSS Parquet Schema",
+  "description": "Schema for DSS.parquet file",
+  "type": "object",
+  "properties": {
+    "datetime": {
+      "type": "string",
+      "description": "datetime (timestamp[us, tz=UTC])"
+    },
+    "value": {
+      "type": "number",
+      "description": "value (double)"
+    },
+    "A": {
+      "type": "string",
+      "description": "A (large_string)"
+    },
+    "B": {
+      "type": "string",
+      "description": "B (large_string)"
+    },
+    "C": {
+      "type": "string",
+      "description": "C (large_string)"
+    },
+    "D": {
+      "type": "string",
+      "description": "D (large_string)"
+    },
+    "E": {
+      "type": "string",
+      "description": "E (large_string)"
+    },
+    "F": {
+      "type": "string",
+      "description": "F (large_string)"
+    }
+  },
+  "required": [
+    "datetime",
+    "value",
+    "A",
+    "B",
+    "C"
+  ]
+}

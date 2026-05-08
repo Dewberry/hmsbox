@@ -1,0 +1,52 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Iceberg Schema for Parquet to DSS conversion",
+    "description": "Schema for converting parquet files to HEC-DSS format using field mapping",
+    "type": "object",
+    "properties": {
+        "timestamp": {
+            "type": "string",
+            "description": "Timestamp field - maps to datetime column"
+        },
+        "value": {
+            "type": "number",
+            "description": "Value field - numeric data"
+        },
+        "provider": {
+            "type": "string",
+            "description": "Provider - maps to DSS path part A"
+        },
+        "site_id": {
+            "type": "string",
+            "description": "Site ID - maps to DSS path part B"
+        },
+        "variable": {
+            "type": "string",
+            "description": "Variable - maps to DSS path part C"
+        },
+        "increment": {
+            "type": "string",
+            "description": "Increment - maps to DSS path part E"
+        },
+        "qualifier": {
+            "type": "string",
+            "description": "Qualifier - maps to DSS path part F"
+        }
+    },
+    "required": [
+        "timestamp",
+        "value",
+        "provider",
+        "site_id",
+        "variable"
+    ],
+    "fieldMapping": {
+        "timestamp": "datetime",
+        "value": "value",
+        "provider": "A",
+        "site_id": "B",
+        "variable": "C",
+        "increment": "E",
+        "qualifier": "F"
+    }
+}

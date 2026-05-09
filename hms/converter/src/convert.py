@@ -5,20 +5,11 @@ from pathlib import Path
 
 from src.parquet import run
 from src.dss_parquet import parquet_to_dss
-from src.logging import log_json
+from src.logging import setup_json_logging
 
 __version__ = "0.1.0"
 
-
-# def setup_logging(debug: bool = False, quiet: bool = False):
-#     """Configure logging."""
-#     level = logging.DEBUG if debug else (logging.ERROR if quiet else logging.INFO)
-#     logging.basicConfig(
-#         level=level,
-#         format="%(levelname)s: %(message)s",
-#     )
-#     # Suppress HecDSS library logs
-#     logging.getLogger("hecdss").setLevel(logging.ERROR)
+logger = setup_json_logging()
 
 
 def dss_to_parquet_cmd(args) -> int:
@@ -26,9 +17,8 @@ def dss_to_parquet_cmd(args) -> int:
     # Validate input file exists
     input_path = Path(args.input_dss)
     if not input_path.exists():
-        log_json(
-            "ERROR",
-            f"Input file not found: input={input_path} output={args.output or ''}",
+        logger.error(
+            f"Input file not found: input={input_path} output={args.output or ''}"
         )
         return 1
 
@@ -42,10 +32,7 @@ def dss_to_parquet_cmd(args) -> int:
     else:
         output_path = str(input_path.parent / f"{input_path.stem}.parquet")
 
-    log_json(
-        "INFO",
-        f"Starting DSS to Parquet conversion: input={input_path}",
-    )
+    logger.info(f"Starting DSS to Parquet conversion: input={input_path}")
 
     try:
         _ = run(
@@ -61,15 +48,11 @@ def dss_to_parquet_cmd(args) -> int:
             use_iceberg_schema=not args.no_iceberg_schema,
         )
 
-        log_json(
-            "INFO",
-            f"Conversion completed successfully: output={output_path}",
-        )
+        logger.info(f"Conversion completed successfully: output={output_path}")
         return 0
     except Exception as e:
-        log_json(
-            "ERROR",
-            f"Conversion failed: input={input_path} output={output_path} error={e}",
+        logger.error(
+            f"Conversion failed: input={input_path} output={output_path} error={e}"
         )
         return 1
 
@@ -79,9 +62,8 @@ def parquet_to_dss_cmd(args) -> int:
     # Validate input file exists
     input_path = Path(args.input_parquet)
     if not input_path.exists():
-        log_json(
-            "ERROR",
-            f"Input file not found: input={input_path} output={args.output or ''}",
+        logger.error(
+            f"Input file not found: input={input_path} output={args.output or ''}"
         )
         return 1
 
@@ -95,10 +77,7 @@ def parquet_to_dss_cmd(args) -> int:
     else:
         output_path = str(input_path.parent / f"{input_path.stem}.dss")
 
-    log_json(
-        "INFO",
-        f"Starting Parquet to DSS conversion: input={input_path}",
-    )
+    logger.info(f"Starting Parquet to DSS conversion: input={input_path}")
 
     try:
         _ = parquet_to_dss(
@@ -108,15 +87,11 @@ def parquet_to_dss_cmd(args) -> int:
             suppress_dss_output=not args.verbose,
         )
 
-        log_json(
-            "INFO",
-            f"Conversion completed successfully: output={output_path} exit_code=0",
-        )
+        logger.info(f"Conversion completed successfully: output={output_path}")
         return 0
     except Exception as e:
-        log_json(
-            "ERROR",
-            f"Conversion failed: input={input_path} output={output_path} error={e}",
+        logger.error(
+            f"Conversion failed: input={input_path} output={output_path} error={e}"
         )
         return 1
 
@@ -126,7 +101,7 @@ def main() -> int:
     try:
         return _main_impl()
     except Exception as e:
-        log_json("ERROR", f"Unexpected error in entrypoint: {e}")
+        logger.error(f"Unexpected error in entrypoint: {e}")
         return 1
 
 

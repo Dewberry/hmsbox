@@ -1,30 +1,57 @@
 #!/usr/bin/env python3
 
 import json
-
-# import shlex
-# import subprocess
+import logging
 import sys
 from datetime import datetime, timezone
 
 
-def log_json(level: str, message: str, **fields: object) -> None:
-    # Keep only ts/level/message at the top level.
-    # When extra fields are provided, encode them into the message string.
-    if fields:
-        message_text = json.dumps(
-            {"text": str(message), **fields}, separators=(",", ":"), default=str
-        )
-    else:
-        message_text = str(message)
+class JSONFormatter(logging.Formatter):
+    """Custom formatter that outputs structured JSON logs."""
 
-    payload: dict[str, object] = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "level": str(level).upper(),
-        "message": message_text,
-    }
-    output = json.dumps(payload, separators=(",", ":"))
-    if str(payload.get("level", "")).upper() == "ERROR":
-        print(output, file=sys.stderr)
-    else:
-        print(output)
+    def format(self, record: logging.LogRecord) -> str:
+        """Format log record as JSON with ts, level, and message fields."""
+        timestamp = (
+            datetime.now(timezone.utc)
+            .replace(tzinfo=None)
+            .isoformat(timespec="milliseconds")
+        )
+
+        payload = {
+            "ts": timestamp,
+            "level": record.levelname,
+            "message": record.getMessage(),
+        }
+        return json.dumps(payload, separators=(",", ":"))
+
+
+def setup_json_logging() -> logging.Logger:
+    """
+    Configure logging to output structured JSON.
+
+    Returns:
+        Configured logger instance
+    """
+    logger = logging.getLogger("converter")
+    logger.setLevel(logging.INFO)
+
+    # Remove any existing handlers
+    logger.handlers.clear()
+
+    # Create handlers for stdout (INFO) and stderr (ERROR)
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(logging.INFO)
+    stdout_handler.addFilter(lambda record: record.levelno < logging.ERROR)
+    stdout_handler.setFormatter(JSONFormatter())
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.ERROR)
+    stderr_handler.setFormatter(JSONFormatter())
+
+    logger.addHandler(stdout_handler)
+    logger.addHandler(stderr_handler)
+
+    # Prevent propagation to root logger
+    logger.propagate = False
+
+    return logger

@@ -12,9 +12,6 @@ except ModuleNotFoundError:
     from validate import load_json_schema
 
 logger = logging.getLogger(__name__)
-# Suppress module logger output by default; structured JSON logging is handled in convert.py
-# Can be re-enabled by setting logger level externally
-# logger.setLevel(logging.CRITICAL + 1)
 
 _DSS_SCHEMA_FILE = (
     Path(__file__).resolve().parent.parent / "schemas" / "dss-schema.json"

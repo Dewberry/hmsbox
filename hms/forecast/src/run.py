@@ -92,7 +92,9 @@ def _run_python(python_args: list[str], json_logs_only: bool) -> int:
 
     command, mode = _resolve_python_command(python_bin, command_args)
     if command is None:
-        logger.info("No python args provided; skipping Python step [step=python]")
+        logger.info(
+            "PROCESSING | No processing args provided; skipping Python step [step=python]"
+        )
         return 0
 
     step = f"python_{mode}"
@@ -113,6 +115,27 @@ def _run_python(python_args: list[str], json_logs_only: bool) -> int:
     return 0
 
 
+def _run_download(mode: str, skip_model: bool, json_logs_only: bool) -> int:
+    """Run data download from S3."""
+    logger.debug("Running download entrypoint [step=download]")
+
+    download_cmd = ["python3", "/usr/local/bin/download_data.py"]
+    if mode:
+        download_cmd.extend(["--mode", mode])
+    if skip_model:
+        download_cmd.append("--skip-model")
+
+    exit_code = run_cmd(
+        download_cmd, "Data download failed", "download", json_logs_only
+    )
+
+    if exit_code != 0:
+        return exit_code
+
+    logger.debug("Download entrypoint completed successfully [step=download]")
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run HMS and DSS Python converter in sequence"
@@ -120,6 +143,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hms-only", action="store_true", help="Run only HMS")
     parser.add_argument(
         "--python-only", action="store_true", help="Run only Python converter"
+    )
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help="Download model and data from S3 before running HMS",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["test", "validation1", "validation2", "validation3"],
+        help="Use predefined datetime mode (test, validation1, validation2, validation3). If not specified with --download, uses current time. Requires --download.",
+    )
+    parser.add_argument(
+        "--skip-model",
+        action="store_true",
+        help="Skip downloading model vault, only download forcing/observations (requires --download)",
     )
     parser.add_argument(
         "--json-logs-only",
@@ -153,16 +192,33 @@ def main() -> int:
 
     args = parse_args()
     json_logs_only = args.json_logs_only
+    run_download = args.download
     run_hms = not args.python_only
     run_python = not args.hms_only
-
+    logger.info(
+        "HMS BOX    | forecast container initializing",
+        extra={
+            "run_download": run_download,
+            "run_hms": run_hms,
+            "run_python": run_python,
+        },
+    )
     if args.hms_only and args.python_only:
         logger.error(
             "--hms-only and --python-only cannot be used together [exit_code=2]"
         )
         return 2
 
+    if (args.mode or args.skip_model) and not args.download:
+        logger.error("--mode and --skip-model require --download flag [exit_code=2]")
+        return 2
+
     logger.debug("HMS Forecast Container starting")
+
+    if run_download:
+        download_status = _run_download(args.mode, args.skip_model, json_logs_only)
+        if download_status != 0:
+            return download_status
 
     if run_hms:
         hms_status = _run_hms(args.hms_args, json_logs_only)
@@ -174,7 +230,7 @@ def main() -> int:
         if python_status != 0:
             return python_status
 
-    logger.info("All entrypoints completed successfully")
+    logger.info("HMS BOX    | Forecast container exited successfully")
     return 0
 
 

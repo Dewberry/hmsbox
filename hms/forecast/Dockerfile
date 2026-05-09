@@ -1,6 +1,9 @@
 # Declare HMS_VERSION globally before any FROM
 ARG HMS_VERSION=4.14-beta.1
 
+# Build stage for modelvault binary
+FROM ghcr.io/dewberry/modelvault:main-a72c138 AS modelvault-builder
+
 # Use the existing HMS container as base
 FROM hmsbox-headless:${HMS_VERSION}
 
@@ -14,18 +17,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy modelvault binary for unpacking model archives
+COPY --from=modelvault-builder /app/modelvault /usr/local/bin/modelvault
+
 # Copy Python environment and source from pre-built DSS image
 COPY --from=hmsbox-converter:latest /app /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-
-# COPY src/entrypoint.py /usr/local/bin/entrypoint.py
-# COPY src/entrypoint_logging.py /usr/local/bin/entrypoint_logging.py
-# COPY src/entrypoint_time.py /usr/local/bin/entrypoint_time.py
-# COPY src/parse_results_stats.py /usr/local/bin/parse_results_stats.py
+# Copy forecast-specific scripts and configuration
 COPY src/ /usr/local/bin/
+COPY config.yaml /app/config.yaml
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/run.py /usr/local/bin/parse_results_stats.py
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/run.py /usr/local/bin/parse_results_stats.py /usr/local/bin/download_data.py
 
 WORKDIR /app
 RUN rm -rf /app/.venv && \

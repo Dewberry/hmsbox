@@ -1,0 +1,57 @@
+# HMS Forecast Container Configuration
+# This file defines the S3 paths for model vault, forcing data, and observations
+
+# Model version to use
+model_version: "trinity-v20260509"
+
+# S3 path templates - {year}, {month}, {day}, {hour} will be replaced with actual values
+s3_paths:
+  # Model vault path
+  model_vault: "s3://flood-warning/dev/models/{model_version}.parquet"
+
+  # Forcing data paths
+  forcing:
+    qpf: "s3://flood-warning/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/hrrr_qpf.nc"
+    temp: "s3://flood-warning/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/rtma_temp.nc"
+    qpe: "s3://flood-warning/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/mrms_qpe.nc"
+
+  # Observations data path
+  observations: "s3://flood-warning/staging/temporary/observations/{year}/{month:02d}/{day:02d}/{hour:02d}/gages.dss"
+
+# Local paths where data will be downloaded
+local_paths:
+  model_dir: "/mnt/model"
+  forcing_dir: "/mnt/model/forcing"
+  observations_dir: "/mnt/model/observations"
+
+# Predefined datetime modes for testing and validation
+# Use --mode flag to select: --mode test, --mode validation1, etc.
+# If no mode specified, uses current UTC time
+modes:
+  test:
+    description: "Test mode - uses data from March 11, 2026"
+    year: 2026
+    month: 3
+    day: 11
+    hour: 1
+
+  validation1:
+    description: "Validation mode 1 - August 21, 2022 - Short duration, high intensity event creating deep water on major arterials"
+    year: 2022
+    month: 8
+    day: 21
+    hour: 1
+
+  validation2:
+    description: "Validation mode 2 - June 15, 2023 - Medium duration, moderate intensity event causing vehicular flooding"
+    year: 2023
+    month: 6
+    day: 15
+    hour: 1
+
+  validation3:
+    description: "Validation mode 3 - May 28, 2024 - Long duration event triggering reservoir releases"
+    year: 2024
+    month: 5
+    day: 28
+    hour: 1

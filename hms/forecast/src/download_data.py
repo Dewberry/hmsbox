@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+Download model vault, forcing data, and observations from S3 for HMS forecast.
+"""
+
+import argparse
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import boto3
+import yaml
+from botocore.exceptions import ClientError
+
+from forecast_logging import setup_json_logging
+from vault_utils import download_s3_file, unpack_modelvault
+
+
+def load_config(config_path: str = "/app/config.yaml") -> Dict:
+    """Load configuration from YAML file."""
+    logger = setup_json_logging()
+
+    if not os.path.exists(config_path):
+        logger.error(f"Configuration file not found: {config_path}")
+        sys.exit(1)
+
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    return config
+
+
+def get_datetime_values(mode: Optional[str], config: Dict) -> Dict[str, int]:
+    """
+    Get year, month, day, hour values from specified mode or current time.
+
+    Args:
+        mode: Mode name (test, validation1, validation2, validation3) or None for current time
+        config: Configuration dictionary
+
+    Returns:
+        Dictionary with year, month, day, hour keys
+    """
+    logger = setup_json_logging()
+
+    if mode:
+        # Look up mode in config
+        modes = config.get("modes", {})
+        if mode not in modes:
+            available = ", ".join(modes.keys()) if modes else "none"
+            logger.error(
+                f"Mode '{mode}' not found in config. Available modes: {available}"
+            )
+            sys.exit(1)
+
+        mode_config = modes[mode]
+        values = {
+            "year": mode_config["year"],
+            "month": mode_config["month"],
+            "day": mode_config["day"],
+            "hour": mode_config["hour"],
+        }
+        description = mode_config.get("description", "")
+        logger.info(
+            f"SIMULATION | mode: '{mode}' year={values['year']} month={values['month']} "
+            f"day={values['day']} hour={values['hour']}"
+        )
+        if description:
+            logger.info(f"SIMULATION | description: {description}")
+    else:
+        # Use current UTC time
+        now = datetime.now(timezone.utc)
+        values = {
+            "year": now.year,
+            "month": now.month,
+            "day": now.day,
+            "hour": now.hour,
+        }
+        logger.info(
+            f"SIMULATION | mode: 'operational' year={values['year']} month={values['month']} "
+            f"day={values['day']} hour={values['hour']}"
+        )
+
+    return values
+
+
+def construct_s3_paths(config: Dict, dt_values: Dict[str, int]) -> Dict[str, str]:
+    """
+    Construct S3 paths by replacing template variables.
+
+    Args:
+        config: Configuration dictionary
+        dt_values: Dictionary with year, month, day, hour values
+
+    Returns:
+        Dictionary with constructed S3 paths
+    """
+    model_version = config.get("model_version", "trinity-v20260509")
+    s3_paths = config["s3_paths"]
+
+    # Create template variables
+    template_vars = {
+        "model_version": model_version,
+        "year": dt_values["year"],
+        "month": dt_values["month"],
+        "day": dt_values["day"],
+        "hour": dt_values["hour"],
+    }
+
+    # Construct paths
+    paths = {
+        "model_vault": s3_paths["model_vault"].format(**template_vars),
+        "forcing_qpf": s3_paths["forcing"]["qpf"].format(**template_vars),
+        "forcing_temp": s3_paths["forcing"]["temp"].format(**template_vars),
+        "forcing_qpe": s3_paths["forcing"]["qpe"].format(**template_vars),
+        "observations": s3_paths["observations"].format(**template_vars),
+    }
+
+    return paths
+
+
+def download_all_data(
+    s3_paths: Dict[str, str], config: Dict, skip_model: bool = False
+) -> bool:
+    """
+    Download all data from S3 (model vault, forcing, observations).
+
+    Args:
+        s3_paths: Dictionary of S3 URIs
+        config: Configuration dictionary
+        skip_model: If True, skip downloading model vault
+
+    Returns:
+        True if successful, False otherwise
+    """
+    logger = setup_json_logging()
+
+    local_paths = config.get("local_paths", {})
+    model_dir = local_paths.get("model_dir", "/mnt/model")
+    forcing_dir = local_paths.get("forcing_dir", "/mnt/model/forcing")
+    observations_dir = local_paths.get("observations_dir", "/mnt/model/observations")
+
+    # Create directories
+    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(forcing_dir, exist_ok=True)
+    os.makedirs(observations_dir, exist_ok=True)
+
+    # Download and unpack model vault
+    if not skip_model:
+        logger.info(f"MODEL      | source: {s3_paths['model_vault']}")
+        success = unpack_modelvault(s3_paths["model_vault"], model_dir, logger)
+        if not success:
+            logger.error("Failed to download and unpack model vault")
+            return False
+        logger.debug("DATA       | modelvault downloaded and unpacked successfully")
+    else:
+        logger.info("DATA       | modelvault download skipped (--skip-model flag)")
+
+    # Download forcing data
+    forcing_files = [
+        ("hrrr_qpf.nc", s3_paths["forcing_qpf"]),
+        ("rtma_temp.nc", s3_paths["forcing_temp"]),
+        ("mrms_qpe.nc", s3_paths["forcing_qpe"]),
+    ]
+
+    for filename, s3_uri in forcing_files:
+        output_path = os.path.join(forcing_dir, filename)
+        logger.info(f"DATA       | forcing: {s3_uri}")
+        if not download_s3_file(s3_uri, output_path, logger):
+            logger.error(f"Failed to download forcing file: {filename}")
+            return False
+        logger.debug(f"Successfully downloaded {filename}")
+
+    # Download observations
+    obs_filename = "gages.dss"
+    obs_output_path = os.path.join(observations_dir, obs_filename)
+    logger.info(f"DATA       | observations: {s3_paths['observations']}")
+    if not download_s3_file(s3_paths["observations"], obs_output_path, logger):
+        logger.error("Failed to download observations file")
+        return False
+    logger.debug("Successfully downloaded observations")
+
+    logger.debug("All data downloaded successfully")
+    return True
+
+
+def main():
+    """Main entry point for data download."""
+    parser = argparse.ArgumentParser(
+        description="Download HMS forecast model and data from S3",
+        epilog="Available modes: test, validation1, validation2, validation3",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["test", "validation1", "validation2", "validation3"],
+        help="Use predefined datetime mode (test, validation1, validation2, validation3). If not specified, uses current time.",
+    )
+    parser.add_argument(
+        "--config",
+        default="/app/config.yaml",
+        help="Path to configuration file (default: /app/config.yaml)",
+    )
+    parser.add_argument(
+        "--skip-model",
+        action="store_true",
+        help="Skip downloading model vault (useful if model is already present)",
+    )
+
+    args = parser.parse_args()
+
+    logger = setup_json_logging()
+    logger.debug("Starting data download [step=download_data]")
+
+    # Load configuration
+    config = load_config(args.config)
+
+    # Get datetime values
+    dt_values = get_datetime_values(args.mode, config)
+
+    # Construct S3 paths
+    s3_paths = construct_s3_paths(config, dt_values)
+
+    # Log the paths we'll be downloading from
+    logger.debug(f"Model vault: {s3_paths['model_vault']}")
+    logger.debug(f"Forcing QPF: {s3_paths['forcing_qpf']}")
+    logger.debug(f"Forcing Temp: {s3_paths['forcing_temp']}")
+    logger.debug(f"Forcing QPE: {s3_paths['forcing_qpe']}")
+    logger.debug(f"Observations: {s3_paths['observations']}")
+
+    # Download all data
+    success = download_all_data(s3_paths, config, args.skip_model)
+
+    if success:
+        logger.debug("Data download completed successfully [step=download_data]")
+        return 0
+    else:
+        logger.error("Data download failed [step=download_data]")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

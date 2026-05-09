@@ -1,0 +1,36 @@
+plugins {
+    id 'java-library'
+}
+
+repositories {
+    mavenCentral()
+}
+
+sourceCompatibility = JavaVersion.VERSION_1_8
+targetCompatibility = JavaVersion.VERSION_1_8
+
+// Allow HMS version to be passed as gradle property (-PhmsVersion=4.12)
+// Default to 4.12 for local builds
+ext.hmsVersion = project.hasProperty('hmsVersion') ? project.hmsVersion : '4.12'
+
+configurations {
+    linux_x64
+}
+
+dependencies {
+    // HMS libraries are provided at runtime by the Docker container
+    compileOnly files("/hec-hms/HEC-HMS-${hmsVersion}/hms.jar")
+    compileOnly fileTree(dir: "/hec-hms/HEC-HMS-${hmsVersion}/lib", include: '*.jar')
+}
+
+jar {
+    zip64 = true
+    manifest {
+        attributes 'Main-Class': 'dewberry.RunHMS'
+    }
+    archiveFileName = 'hms-compute.jar'
+}
+
+group 'dewberry'
+version '0.1.0'
+

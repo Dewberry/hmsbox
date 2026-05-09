@@ -1,0 +1,15 @@
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+*.md
+.DS_Store
+.gradle
+build/
+*.iml
+.classpath
+.project
+.settings/
+.miniodata/
+*.log

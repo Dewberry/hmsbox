@@ -201,6 +201,31 @@ def fetch_and_unpack(
                     logger.error(f"Failed to download observations file: {obs_uri}")
                     return False
 
+        # Fix ownership and permissions on all extracted files
+        # HMS runs as uid 1000, so we need to chown files to that user
+        # This ensures full read/write access without overly permissive permissions
+        logger.debug("Setting ownership and permissions on extracted files")
+        try:
+            # First, fix the output directory itself
+            os.chown(output_dir, 1000, 1000)
+            os.chmod(output_dir, 0o755)  # rwxr-xr-x
+
+            # Then walk through all subdirectories and files
+            for root, dirs, files in os.walk(output_dir):
+                # Change ownership to uid 1000 (hms user in headless container)
+                for dir_name in dirs:
+                    dir_path = os.path.join(root, dir_name)
+                    os.chown(dir_path, 1000, 1000)
+                    os.chmod(dir_path, 0o755)  # rwxr-xr-x
+                for file_name in files:
+                    file_path = os.path.join(root, file_name)
+                    os.chown(file_path, 1000, 1000)
+                    os.chmod(file_path, 0o644)  # rw-r--r--
+            logger.debug("Successfully set ownership and permissions on all files")
+        except OSError as e:
+            logger.warning(f"Failed to set ownership/permissions: {e}")
+            # Don't fail the entire operation for permission issues
+
         return True
 
     finally:

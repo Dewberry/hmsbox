@@ -72,7 +72,7 @@ def parquet_to_dss_cmd(args) -> int:
         output_path = Path(args.output)
         # If output is a directory, append the default filename
         if output_path.is_dir():
-            output_path = output_path / f"{input_path.stem}.dss"`
+            output_path = output_path / f"{input_path.stem}.dss"
         output_path = str(output_path)
     else:
         output_path = str(input_path.parent / f"{input_path.stem}.dss")
@@ -87,7 +87,7 @@ def parquet_to_dss_cmd(args) -> int:
             suppress_dss_output=not args.verbose,
         )
 
-        logger.info(f"Conversion completed successfully: output={output_path}")
+        logger.debug(f"Conversion completed successfully: output={output_path}")
         return 0
     except Exception as e:
         logger.error(

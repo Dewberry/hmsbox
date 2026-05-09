@@ -95,7 +95,7 @@ def parquet_to_dss(
     # Set global debug level for HecDss library (0 = minimal output, 1 = verbose)
     HecDss.set_global_debug_level(0 if suppress_dss_output else 1)
 
-    logger.info(
+    logger.debug(
         f"Starting parquet to DSS conversion: {parquet_path} -> {output_dss_path}"
     )
 
@@ -105,10 +105,10 @@ def parquet_to_dss(
 
     # Normalize columns if using iceberg schema
     if field_mapping:
-        logger.info(f"Normalizing iceberg columns to DSS parts: {field_mapping}")
+        logger.debug(f"Normalizing iceberg columns to DSS parts: {field_mapping}")
         df, _ = _normalize_parquet(df, field_mapping)
 
-    logger.info(f"Loaded parquet with {len(df)} records")
+    logger.debug(f"Loaded parquet with {len(df)} records")
 
     # Get required DSS parts from schema
     required_dss_parts = [

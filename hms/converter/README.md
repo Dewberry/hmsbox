@@ -1,6 +1,6 @@
-# hmsbox-dss
+# hmsbox-converter
 
-Convert HEC-DSS files to/from Parquet format for efficient data processing and storage.
+Convert HEC-DSS files to/from Parquet / NetCDF (coming soon) format for efficient data processing and storage.
 
 ## Features
 
@@ -18,12 +18,12 @@ Convert HEC-DSS files to/from Parquet format for efficient data processing and s
 
 ### Show Help
 ```bash
-docker run hmsbox-dss:latest --help
+docker run hmsbox-converter:latest --help
 ```
 
 ### Show Version
 ```bash
-docker run hmsbox-dss:latest --version
+docker run hmsbox-converter:latest --version
 ```
 
 ## Usage
@@ -33,7 +33,7 @@ docker run hmsbox-dss:latest --version
 Convert a DSS file to Parquet format:
 
 ```bash
-docker run -v $(pwd):/data hmsbox-dss:latest \
+docker run -v $(pwd):/data hmsbox-converter:latest \
   dss-to-parquet /data/input.dss -o /data/output.parquet
 ```
 
@@ -42,7 +42,7 @@ docker run -v $(pwd):/data hmsbox-dss:latest \
 Convert Parquet back to DSS format:
 
 ```bash
-docker run -v $(pwd):/data hmsbox-dss:latest \
+docker run -v $(pwd):/data hmsbox-converter:latest \
   parquet-to-dss /data/input.parquet -o /data/output.dss
 ```
 
@@ -82,14 +82,14 @@ Convert DSS file to Parquet format.
 
 **Example (Iceberg Schema - default):**
 ```bash
-docker run -v $(pwd):/data hmsbox-dss:latest \
+docker run -v $(pwd):/data hmsbox-converter:latest \
   dss-to-parquet /data/model_output.dss \
   -o /data/output.parquet
 ```
 
 **Example (DSS Schema):**
 ```bash
-docker run -v $(pwd):/data hmsbox-dss:latest \
+docker run -v $(pwd):/data hmsbox-converter:latest \
   dss-to-parquet /data/model_output.dss \
   --no-iceberg-schema \
   -o /data/output.parquet
@@ -114,7 +114,7 @@ The D part (date range) is automatically calculated from the time series data du
 
 **Example:**
 ```bash
-docker run -v $(pwd):/data hmsbox-dss:latest \
+docker run -v $(pwd):/data hmsbox-converter:latest \
   parquet-to-dss /data/results.parquet \
   -o /data/output.dss
 ```
@@ -169,7 +169,7 @@ When extra details are available (for example manifests), they are encoded into 
 By default, DSS library output is suppressed for clean JSON logs. Use `-v` or `--verbose` to show all output:
 
 ```bash
-docker run -v $(pwd):/data hmsbox-dss:latest \
+docker run -v $(pwd):/data hmsbox-converter:latest \
   dss-to-parquet /data/input.dss --verbose
 ```
 
@@ -179,7 +179,7 @@ Build the Docker image:
 
 ```bash
 cd hms/converter
-docker build -t hmsbox-dss:latest .
+docker build -t hmsbox-converter:latest .
 ```
 
 Or use the build script from the parent directory:
@@ -194,7 +194,7 @@ cd hms
 Mount your data directory to `/data` or any path in the container:
 
 ```bash
-docker run -v /path/to/your/data:/data hmsbox-dss:latest dss-to-parquet /data/file.dss
+docker run -v /path/to/your/data:/data hmsbox-converter:latest dss-to-parquet /data/file.dss
 ```
 
 ## Exit Codes

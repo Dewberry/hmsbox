@@ -1,5 +1,6 @@
 # Build arguments
 ARG HMS_VERSION=4.14-beta.1
+ARG S3_BUCKET
 
 # Build stage for modelvault binary
 FROM ghcr.io/dewberry/modelvault:main-a72c138 AS modelvault-builder
@@ -32,6 +33,16 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY src/ /usr/local/bin/
 COPY config.yaml /app/config.yaml
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Substitute S3_BUCKET at build time if provided
+ARG S3_BUCKET
+RUN if [ -n "$S3_BUCKET" ]; then \
+      echo "Substituting {S3_BUCKET} with: $S3_BUCKET"; \
+      sed -i "s|{S3_BUCKET}|${S3_BUCKET}|g" /app/config.yaml; \
+    else \
+      echo "No S3_BUCKET build arg provided, will require HMS_S3_BUCKET at runtime"; \
+    fi
+
 RUN chmod +x /usr/local/bin/entrypoint.sh \
     /usr/local/bin/run.py \
     /usr/local/bin/parse_results_stats.py \

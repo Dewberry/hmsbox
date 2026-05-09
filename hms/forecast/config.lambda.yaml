@@ -1,5 +1,5 @@
-# HMS Forecast Container Configuration
-# This file defines the S3 paths for model vault, forcing data, and observations
+# HMS Forecast Lambda Configuration
+# This file is tailored for AWS Lambda where only /tmp is writable.
 
 # Model version to use
 model_version: "trinity-v20260509"
@@ -23,11 +23,11 @@ s3_paths:
     lookback_stats: "s3://{S3_BUCKET}/staging/temporary/results/{year}/{month:02d}/{day:02d}/{hour:02d}/stats.parquet"
     forecast_output: "s3://{S3_BUCKET}/staging/temporary/results/{year}/{month:02d}/{day:02d}/{hour:02d}/forecast.parquet"
 
-# Local paths where data will be downloaded
+# Local paths where data will be downloaded (Lambda: must be under /tmp)
 local_paths:
-  model_dir: "/mnt/model"
-  forcing_dir: "/mnt/model/forcing"
-  observations_dir: "/mnt/model/observations"
+  model_dir: "/tmp/model"
+  forcing_dir: "/tmp/model/forcing"
+  observations_dir: "/tmp/model/observations"
 
 # Predefined datetime modes for testing and validation
 # Use --mode flag to select: --mode test, --mode validation1, etc.

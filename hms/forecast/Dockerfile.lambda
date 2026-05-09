@@ -1,0 +1,67 @@
+# Build arguments
+ARG HMS_VERSION=4.14-beta.1
+ARG BUILD_VERSION=0.1.0
+ARG S3_BUCKET
+
+# Build stage for modelvault binary
+FROM ghcr.io/dewberry/modelvault:main-a72c138 AS modelvault-builder
+
+# Use existing HMS headless image as base and layer Lambda requirements on top
+FROM hmsbox-headless:${HMS_VERSION}
+
+ARG HMS_VERSION
+ARG BUILD_VERSION
+
+LABEL org.opencontainers.image.title="HEC-HMS Forecast Lambda Container" \
+	  org.opencontainers.image.description="HMS forecast workflow packaged for AWS Lambda" \
+	  org.opencontainers.image.version="${BUILD_VERSION}" \
+	  org.opencontainers.image.vendor="Dewberry" \
+	  org.opencontainers.image.source="https://github.com/Dewberry/hmsbox" \
+	  org.opencontainers.image.documentation="https://github.com/Dewberry/hmsbox/tree/main/hms/forecast/README.md"
+
+USER root
+
+# Install Python runtime for workflow scripts and Lambda runtime client
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	python3 \
+	ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Copy binaries and Python app skeleton from converter image
+COPY --from=modelvault-builder /app/modelvault /usr/local/bin/modelvault
+COPY --from=hmsbox-converter:latest /app /app
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Copy forecast source and Lambda-specific config
+COPY src/ /var/task/
+COPY config.lambda.yaml /app/config.yaml
+
+# Substitute S3_BUCKET at build time if provided
+ARG S3_BUCKET
+RUN if [ -n "$S3_BUCKET" ]; then \
+      echo "Substituting {S3_BUCKET} with: $S3_BUCKET"; \
+      sed -i "s|{S3_BUCKET}|${S3_BUCKET}|g" /app/config.yaml; \
+    else \
+      echo "No S3_BUCKET build arg provided, will require HMS_S3_BUCKET at runtime"; \
+    fi
+
+WORKDIR /app
+
+# Rebuild and pin runtime dependencies, then add Lambda runtime interface client
+RUN rm -rf /app/.venv && \
+	UV_PYTHON_INSTALL_DIR=/opt/uv-python uv sync --frozen --no-dev && \
+	uv pip install --python /app/.venv/bin/python awslambdaric
+
+# Lambda writes to /tmp; keep app and venv readable by runtime user
+RUN chown -R hms:hms /app /opt/uv-python /var/task && \
+	chmod -R a+rX /app/.venv /opt/uv-python /var/task
+
+ENV PATH="/app/.venv/bin:$PATH" \
+	PYTHONUNBUFFERED=1 \
+	LAMBDA_TASK_ROOT=/var/task \
+	BUILD_VERSION=${BUILD_VERSION} \
+	HMS_VERSION=${HMS_VERSION}
+
+# Lambda Runtime Interface Client entrypoint
+ENTRYPOINT ["/app/.venv/bin/python", "-m", "awslambdaric"]
+CMD ["lambda_handler.handler"]

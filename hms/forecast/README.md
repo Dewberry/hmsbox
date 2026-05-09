@@ -28,10 +28,13 @@ Download model and data, run lookback+forecast, export results, upload to S3:
 docker run --rm \
     -e AWS_ACCESS_KEY_ID=<key> \
     -e AWS_SECRET_ACCESS_KEY=<secret> \
+    -e HMS_S3_BUCKET=your-bucket-name \
     -v $(pwd)/model:/mnt/model \
     hmsbox-forecast:latest \
     --download --upload /mnt/model/Trinity_Forecast.hms
 ```
+
+**Note:** `HMS_S3_BUCKET` is required. When running on AWS infrastructure (EC2, ECS, Lambda), AWS credentials are provided may automatically via IAM roles and don't need to be specified.
 
 ### Run with Test Mode
 
@@ -91,6 +94,8 @@ The container uses `config.yaml` to define S3 paths, local directories, and pred
 
 1. **Model Version**: Specifies which model archive to use
 2. **S3 Path Templates**: Define locations for model vault, forcing data, observations, and results
+   - Uses `{S3_BUCKET}` placeholder that gets replaced with the `HMS_S3_BUCKET` environment variable (required)
+   - Uses `{year}`, `{month}`, `{day}`, `{hour}` placeholders for datetime-based paths
 3. **Local Paths**: Where files are stored in the container
 4. **Datetime Modes**: Predefined scenarios for testing and validation
 
@@ -104,13 +109,14 @@ The container uses `config.yaml` to define S3 paths, local directories, and pred
 ```yaml
 model_version: "trinity-v20260509"
 
+# S3 paths use {S3_BUCKET} placeholder (replaced by HMS_S3_BUCKET env var)
 s3_paths:
-  model_vault: "s3://flood-warning/dev/models/{model_version}.parquet"
+  model_vault: "s3://{S3_BUCKET}/dev/models/{model_version}.parquet"
   forcing:
-    qpf: "s3://flood-warning/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/hrrr_qpf.nc"
-    temp: "s3://flood-warning/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/rtma_temp.nc"
-    qpe: "s3://flood-warning/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/mrms_qpe.nc"
-  observations: "s3://flood-warning/staging/temporary/observations/{year}/{month:02d}/{day:02d}/{hour:02d}/gages.dss"
+    qpf: "s3://{S3_BUCKET}/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/hrrr_qpf.nc"
+    temp: "s3://{S3_BUCKET}/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/rtma_temp.nc"
+    qpe: "s3://{S3_BUCKET}/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/mrms_qpe.nc"
+  observations: "s3://{S3_BUCKET}/staging/temporary/observations/{year}/{month:02d}/{day:02d}/{hour:02d}/gages.dss"
 
 local_paths:
   model_dir: "/mnt/model"
@@ -191,6 +197,7 @@ Run a real-time forecast using current UTC datetime:
 docker run --rm \
     -e AWS_ACCESS_KEY_ID=<key> \
     -e AWS_SECRET_ACCESS_KEY=<secret> \
+    -e HMS_S3_BUCKET=your-bucket-name \
     -v $(pwd)/model:/mnt/model \
     hmsbox-forecast:latest \
     --download /mnt/model/Trinity_Forecast.hms
@@ -365,29 +372,89 @@ Uploads generated results back to S3:
 
 ## AWS Credentials
 
-The container requires AWS credentials to access S3. Provide them via:
+The container requires AWS credentials to access S3. How you provide credentials depends on where you're running:
 
-### Environment Variables
+### Running on AWS Infrastructure (EC2, ECS, Lambda, etc.)
+
+**No credentials needed!** If configured, AWS automatically provides credentials via IAM roles attached to your compute resource. Just set the required environment variables:
+
 ```bash
+# On EC2 instance with IAM role
 docker run --rm \
-    -e AWS_ACCESS_KEY_ID=<your_key> \
-    -e AWS_SECRET_ACCESS_KEY=<your_secret> \
+    -e HMS_S3_BUCKET=your-bucket-name \
     -v $(pwd)/model:/mnt/model \
     hmsbox-forecast:latest \
     --download /mnt/model/Trinity_Forecast.hms
 ```
 
-### AWS Credentials File
+### Running Locally or Outside AWS
+
+### Running Locally or Outside AWS
+
+For local development or when running outside AWS, provide credentials explicitly:
+
+### Environment Variables
+
+The container supports the following environment variables:
+
+**S3 Configuration (REQUIRED):**
+- `HMS_S3_BUCKET` - S3 bucket name (required, no default)
+  - Replaces `{S3_BUCKET}` placeholder in `config.yaml`
+
+**AWS Credentials (required only for local/non-configured environments):**
+- `AWS_ACCESS_KEY_ID` - AWS access key
+- `AWS_SECRET_ACCESS_KEY` - AWS secret key
+- `AWS_DEFAULT_REGION` - AWS region (optional, defaults to us-east-1)
+
+**Note:** When running on AWS infrastructure (EC2, ECS, Lambda), IAM roles automatically provide credentials, so `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are not needed.
+
+**Example (local development):**
 ```bash
 docker run --rm \
+    -e AWS_ACCESS_KEY_ID=<your_key> \
+    -e AWS_SECRET_ACCESS_KEY=<your_secret> \
+    -e HMS_S3_BUCKET=my-custom-bucket \
+    -v $(pwd)/model:/mnt/model \
+    hmsbox-forecast:latest \
+    --download /mnt/model/Trinity_Forecast.hms
+```
+
+**Example (on AWS with IAM role):**
+```bash
+# No AWS credentials needed - IAM role provides them
+docker run --rm \
+    -e HMS_S3_BUCKET=my-bucket \
+    -v $(pwd)/model:/mnt/model \
+    hmsbox-forecast:latest \
+    --download /mnt/model/Trinity_Forecast.hms
+```
+
+**Using .env file:**
+```bash
+# Copy and edit .env.example
+cp .env.example .env
+# Edit .env with your bucket name and credentials (if running locally)
+
+# Run with .env file
+docker run --rm \
+    --env-file .env \
+    -v $(pwd)/model:/mnt/model \
+    hmsbox-forecast:latest \
+    --download /mnt/model/Trinity_Forecast.hms
+```
+
+### AWS Credentials File (local development)
+```bash
+docker run --rm \
+    -e HMS_S3_BUCKET=your-bucket-name \
     -v ~/.aws:/root/.aws:ro \
     -v $(pwd)/model:/mnt/model \
     hmsbox-forecast:latest \
     --download /mnt/model/Trinity_Forecast.hms
 ```
 
-### IAM Role
-When running on AWS infrastructure (EC2, ECS, Lambda), IAM roles are automatically used.
+### IAM Role (AWS infrastructure)
+When running on AWS infrastructure (EC2, ECS, Lambda), IAM roles may automatically used and no explicit credentials need be required. Simply ensure the IAM role attached to your resource has the necessary S3 permissions.
 
 ## Logging
 
@@ -415,10 +482,31 @@ The container outputs structured JSON logs for integration with logging systems:
 
 Build the forecast container:
 
+### Option 1: Runtime Configuration (Flexible)
+
+Build without S3 bucket - requires `HMS_S3_BUCKET` environment variable at runtime:
+
 ```bash
 cd hms
 ./build-forecast.sh
 ```
+
+This creates a flexible image that can be used with any S3 bucket by setting `HMS_S3_BUCKET` at runtime.
+
+### Option 2: Build-Time Configuration (Environment-Specific)
+
+Bake the S3 bucket into the image at build time:
+
+```bash
+cd hms
+./build-forecast.sh my-prod-bucket
+```
+
+This creates an environment-specific image with the bucket hardcoded - no runtime environment variable needed.
+
+**Use Cases:**
+- **Runtime configuration**: Single image for dev/staging/prod with different buckets
+- **Build-time configuration**: Strict environment separation, slightly faster startup, no runtime config needed
 
 **Build Process:**
 1. Uses `hmsbox-headless:4.14-beta.1` as base image (HMS simulation engine)
@@ -426,7 +514,8 @@ cd hms
 3. Copies Python DSS converter environment from `hmsbox-converter:latest`
 4. Installs forecast-specific scripts: `run.py`, `download_data.py`, `upload_results.py`, `parse_results_stats.py`
 5. Copies `config.yaml` configuration
-6. Installs Python dependencies using `uv` (boto3, pyyaml, pandas, etc.)
+6. Optionally substitutes `{S3_BUCKET}` placeholder if build arg provided
+7. Installs Python dependencies using `uv` (boto3, pyyaml, pandas, etc.)
 
 **Build Requirements:**
 - `hmsbox-headless:4.14-beta.1` must be built first
@@ -439,7 +528,6 @@ cd hms
 ./build-forecast-with-download.sh
 ```
 
-This also runs a test download to verify S3 connectivity and config.
 
 ## Dependencies
 

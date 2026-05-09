@@ -13,12 +13,27 @@ from typing import Dict, Optional
 import boto3
 import yaml
 from botocore.exceptions import ClientError
-
 from forecast_logging import setup_json_logging
 
 
+def _replace_env_vars(obj, env_vars: Dict[str, str]):
+    """Recursively replace environment variable placeholders in config."""
+    if isinstance(obj, dict):
+        return {k: _replace_env_vars(v, env_vars) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_replace_env_vars(item, env_vars) for item in obj]
+    elif isinstance(obj, str):
+        # Replace {S3_BUCKET} and other env var placeholders
+        result = obj
+        for key, value in env_vars.items():
+            result = result.replace(f"{{{key}}}", value)
+        return result
+    else:
+        return obj
+
+
 def load_config(config_path: str = "/app/config.yaml") -> Dict:
-    """Load configuration from YAML file."""
+    """Load configuration from YAML file with environment variable substitution."""
     logger = setup_json_logging()
 
     if not os.path.exists(config_path):
@@ -27,6 +42,28 @@ def load_config(config_path: str = "/app/config.yaml") -> Dict:
 
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
+
+    # Get environment variables for substitution
+    # Check if config still has {S3_BUCKET} placeholder (not substituted at build time)
+    config_str = yaml.dump(config)
+    if "{S3_BUCKET}" in config_str:
+        # Build-time substitution was not done, require runtime env var
+        s3_bucket = os.environ.get("HMS_S3_BUCKET")
+        if not s3_bucket:
+            logger.error(
+                "HMS_S3_BUCKET environment variable is required but not set (S3 bucket was not configured at build time)"
+            )
+            sys.exit(1)
+
+        env_vars = {
+            "S3_BUCKET": s3_bucket,
+        }
+        # Replace environment variable placeholders
+        config = _replace_env_vars(config, env_vars)
+        logger.info(f"Using S3 bucket from runtime environment: {s3_bucket}")
+    else:
+        # Build-time substitution was done, config is ready to use
+        logger.info("Using S3 bucket configured at build time")
 
     return config
 

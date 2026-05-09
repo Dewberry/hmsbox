@@ -283,18 +283,30 @@ All containers produce structured JSON logs for integration with logging systems
 
 The containers are designed for cloud-native deployment:
 
-- **AWS Batch**: Scheduled or event-driven forecast runs
-- **AWS Lambda**: Lightweight orchestration (with EFS for model storage)
+- **AWS Lambda**: Serverless forecast execution (up to 15 min)
+  - Event-driven or scheduled triggers
+  - Supports images up to 10GB
+  - Lambda-specific build available: `./build-forecast-lambda.sh`
+  - See [hms/forecast/LAMBDA.md](hms/forecast/LAMBDA.md) for deployment guide
+- **AWS Batch**: Best for long-running jobs (no 15-min limit)
+  - Scheduled or event-driven forecast runs
+  - Better for complex models that exceed Lambda timeout
 - **Kubernetes**: Scalable forecast processing with CronJobs
-- **ECS/Fargate**: Container-based forecast services
+  - Horizontal scaling for multiple concurrent forecasts
+  - Native integration with cloud storage
+- **ECS/Fargate**: Container-based always-on services
+  - Long-running forecast services
+  - Integration with load balancers and service discovery
 - **GitHub Actions**: CI/CD for model testing and validation
+  - Automated testing of model changes
+  - Validation runs for new data sources
 
 ## Roadmap
 
 - [ ] Stabilize data model and S3 path structures
 - [ ] Complete documentation with end-to-end examples
 - [ ] Provide sample datasets and models
-- [ ] Expand forcing data source integrations
+
 
 ## Contributing
 

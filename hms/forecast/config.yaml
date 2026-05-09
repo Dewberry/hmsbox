@@ -18,6 +18,10 @@ s3_paths:
   # Observations data path
   observations: "s3://flood-warning/staging/temporary/observations/{year}/{month:02d}/{day:02d}/{hour:02d}/gages.dss"
 
+  results:
+    lookback_stats: "s3://flood-warning/staging/temporary/results/{year}/{month:02d}/{day:02d}/{hour:02d}/stats.parquet"
+    forecast_output: "s3://flood-warning/staging/temporary/results/{year}/{month:02d}/{day:02d}/{hour:02d}/forecast.parquet"
+
 # Local paths where data will be downloaded
 local_paths:
   model_dir: "/mnt/model"

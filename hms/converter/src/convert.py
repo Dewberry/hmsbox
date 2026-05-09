@@ -32,7 +32,7 @@ def dss_to_parquet_cmd(args) -> int:
     else:
         output_path = str(input_path.parent / f"{input_path.stem}.parquet")
 
-    logger.info(f"Starting DSS to Parquet conversion: input={input_path}")
+    logger.debug(f"extracting data from DSS: input={input_path} output={output_path}")
 
     try:
         _ = run(
@@ -48,7 +48,7 @@ def dss_to_parquet_cmd(args) -> int:
             use_iceberg_schema=not args.no_iceberg_schema,
         )
 
-        logger.info(f"Conversion completed successfully: output={output_path}")
+        logger.debug(f"Conversion completed successfully: output={output_path}")
         return 0
     except Exception as e:
         logger.error(
@@ -72,12 +72,12 @@ def parquet_to_dss_cmd(args) -> int:
         output_path = Path(args.output)
         # If output is a directory, append the default filename
         if output_path.is_dir():
-            output_path = output_path / f"{input_path.stem}.dss"
+            output_path = output_path / f"{input_path.stem}.dss"`
         output_path = str(output_path)
     else:
         output_path = str(input_path.parent / f"{input_path.stem}.dss")
 
-    logger.info(f"Starting Parquet to DSS conversion: input={input_path}")
+    logger.debug(f"Starting Parquet to DSS conversion: input={input_path}")
 
     try:
         _ = parquet_to_dss(

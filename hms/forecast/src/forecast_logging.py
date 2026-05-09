@@ -25,22 +25,25 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(payload, separators=(",", ":"))
 
 
-def setup_json_logging() -> logging.Logger:
+def setup_json_logging(level: int = logging.INFO) -> logging.Logger:
     """
     Configure logging to output structured JSON.
+
+    Args:
+        level: Logging level (e.g., logging.DEBUG, logging.INFO)
 
     Returns:
         Configured logger instance
     """
     logger = logging.getLogger("converter")
-    logger.setLevel(logging.INFO)
+    logger.setLevel(level)
 
     # Remove any existing handlers
     logger.handlers.clear()
 
-    # Create handlers for stdout (INFO) and stderr (ERROR)
+    # Create handlers for stdout (INFO/DEBUG) and stderr (ERROR)
     stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setLevel(logging.INFO)
+    stdout_handler.setLevel(level)
     stdout_handler.addFilter(lambda record: record.levelno < logging.ERROR)
     stdout_handler.setFormatter(JSONFormatter())
 

@@ -7,11 +7,12 @@ import csv
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from forecast_logging import setup_json_logging
 
 
 def parse_results_xml(xml_file):
     """Parse HMS results XML and extract key statistics."""
-
+    logger = setup_json_logging()
     tree = ET.parse(xml_file)
     root = tree.getroot()
 
@@ -23,6 +24,7 @@ def parse_results_xml(xml_file):
         "StartTime": root.findtext("StartTime"),
         "EndTime": root.findtext("EndTime"),
     }
+    logger.debug(f"Parsed run info: {run_info}")
 
     # Extract basin elements and their statistics
     rows = []
@@ -62,8 +64,9 @@ def parse_results_xml(xml_file):
 
 def save_to_csv(rows, output_file):
     """Save extracted data to CSV file."""
+    logger = setup_json_logging()
     if not rows:
-        print("No data to write")
+        logger.error("No data to write")
         return
 
     fieldnames = rows[0].keys()
@@ -73,21 +76,26 @@ def save_to_csv(rows, output_file):
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"Saved {len(rows)} rows to {output_file}")
+    logger.info(f"Saved {len(rows)} rows to {output_file}")
 
 
 def save_to_parquet(rows, output_file):
     """Save extracted data to Parquet file using PyArrow."""
+    logger = setup_json_logging()
     if not rows:
-        print("No data to write")
+        logger.error("No data to write")
         return
 
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
     except ImportError:
-        print("Error: PyArrow not installed. Install with: pip install pyarrow")
+        logger.error("Error: PyArrow not installed. Install with: pip install pyarrow")
         sys.exit(1)
+
+    # Ensure output directory exists
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Convert rows to pyarrow table
     table = pa.Table.from_pylist(rows)
@@ -95,26 +103,27 @@ def save_to_parquet(rows, output_file):
     # Write parquet file
     pq.write_table(table, output_file)
 
-    print(f"Saved {len(rows)} rows to {output_file}")
+    logger.debug(f"Saved {len(rows)} rows to {output_file}")
 
 
 if __name__ == "__main__":
+    logger = setup_json_logging()
     if len(sys.argv) < 2:
-        print("Usage: python3 parse_results_stats.py <xml_file> [output_file]")
-        print("Output format determined by file extension (.csv or .parquet)")
+        logger.error("Usage: python3 parse_results_stats.py <xml_file> [output_file]")
+        logger.error("Output format determined by file extension (.csv or .parquet)")
         sys.exit(1)
 
     xml_file = sys.argv[1]
     output_file = sys.argv[2] if len(sys.argv) > 2 else "stats.parquet"
 
     if not Path(xml_file).exists():
-        print(f"Error: XML file not found: {xml_file}")
+        logger.error(f"Error: XML file not found: {xml_file}")
         sys.exit(1)
 
     run_info, rows = parse_results_xml(xml_file)
 
-    print(f"Run: {run_info['RunName']}")
-    print(f"Extracted {len(rows)} time series entries")
+    logger.debug(f"Stats results Run: {run_info['RunName']}")
+    logger.debug(f"Stats Extracted {len(rows)} time series entries")
 
     # Determine output format by file extension
     if output_file.endswith(".parquet"):

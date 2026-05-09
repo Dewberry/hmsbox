@@ -3,10 +3,13 @@
 import argparse
 from datetime import datetime
 from pathlib import Path
+from forecast_logging import setup_json_logging
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Create a Forecast.control or Lookback.control file")
+    parser = argparse.ArgumentParser(
+        description="Create a Forecast.control or Lookback.control file"
+    )
     parser.add_argument(
         "control_type",
         nargs="?",
@@ -29,6 +32,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    logger = setup_json_logging()
     args = parse_args()
 
     control_name = args.control_type
@@ -55,7 +59,7 @@ def main() -> int:
     )
 
     output_file.write_text(content, encoding="utf-8")
-    print(f"Created control file: {output_file}")
+    logger.debug(f"Created control file: {output_file}")
     return 0
 
 

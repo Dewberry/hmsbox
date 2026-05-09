@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-Download model vault, forcing data, and observations from S3 for HMS forecast.
+Upload forecast results (lookback stats and forecast output) to S3.
 """
 
 import argparse
 import os
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import boto3
 import yaml
 from botocore.exceptions import ClientError
 
 from forecast_logging import setup_json_logging
-from vault_utils import download_s3_file, unpack_modelvault
 
 
 def load_config(config_path: str = "/app/config.yaml") -> Dict:
@@ -64,12 +62,12 @@ def get_datetime_values(mode: Optional[str], config: Dict) -> Dict[str, int]:
             "hour": mode_config["hour"],
         }
         description = mode_config.get("description", "")
-        logger.info(
+        logger.debug(
             f"METADATA   | mode: '{mode}' year={values['year']} month={values['month']} "
             f"day={values['day']} hour={values['hour']}"
         )
         if description:
-            logger.info(f"METADATA   | description: {description}")
+            logger.debug(f"METADATA   | description: {description}")
     else:
         # Use current UTC time
         now = datetime.now(timezone.utc)
@@ -79,7 +77,7 @@ def get_datetime_values(mode: Optional[str], config: Dict) -> Dict[str, int]:
             "day": now.day,
             "hour": now.hour,
         }
-        logger.info(
+        logger.debug(
             f"METADATA   | mode: 'operational' year={values['year']} month={values['month']} "
             f"day={values['day']} hour={values['hour']}"
         )
@@ -96,42 +94,85 @@ def construct_s3_paths(config: Dict, dt_values: Dict[str, int]) -> Dict[str, str
         dt_values: Dictionary with year, month, day, hour values
 
     Returns:
-        Dictionary with constructed S3 paths
+        Dictionary with constructed S3 paths for results
     """
-    model_version = config.get("model_version", "trinity-v20260509")
     s3_paths = config["s3_paths"]
 
     # Create template variables
     template_vars = {
-        "model_version": model_version,
         "year": dt_values["year"],
         "month": dt_values["month"],
         "day": dt_values["day"],
         "hour": dt_values["hour"],
     }
 
-    # Construct paths
+    # Construct result paths
     paths = {
-        "model_vault": s3_paths["model_vault"].format(**template_vars),
-        "forcing_qpf": s3_paths["forcing"]["qpf"].format(**template_vars),
-        "forcing_temp": s3_paths["forcing"]["temp"].format(**template_vars),
-        "forcing_qpe": s3_paths["forcing"]["qpe"].format(**template_vars),
-        "observations": s3_paths["observations"].format(**template_vars),
+        "lookback_stats": s3_paths["results"]["lookback_stats"].format(**template_vars),
+        "forecast_output": s3_paths["results"]["forecast_output"].format(
+            **template_vars
+        ),
     }
 
     return paths
 
 
-def download_all_data(
-    s3_paths: Dict[str, str], config: Dict, skip_model: bool = False
-) -> bool:
+def upload_s3_file(local_path: str, s3_uri: str, logger) -> bool:
     """
-    Download all data from S3 (model vault, forcing, observations).
+    Upload a file from local path to S3.
+
+    Args:
+        local_path: Local file path to upload from
+        s3_uri: S3 URI (e.g., s3://bucket/path/to/file.ext)
+        logger: Logger instance
+
+    Returns:
+        True if successful, False otherwise
+    """
+    # Check if local file exists
+    if not os.path.exists(local_path):
+        logger.error(f"Local file not found: {local_path}")
+        return False
+
+    # Parse S3 URI
+    if not s3_uri.startswith("s3://"):
+        logger.error(f"Invalid S3 URI format: {s3_uri}. Expected s3://bucket/key")
+        return False
+
+    s3_path = s3_uri[5:]  # Remove 's3://'
+    parts = s3_path.split("/", 1)
+    if len(parts) != 2:
+        logger.error(f"Invalid S3 path format: {s3_uri}")
+        return False
+
+    bucket, key = parts
+
+    s3_client = boto3.client("s3")
+    logger.debug(f"Uploading {local_path} to s3://{bucket}/{key}")
+
+    try:
+        s3_client.upload_file(local_path, bucket, key)
+        file_size = os.path.getsize(local_path)
+        logger.debug(
+            f"Successfully uploaded {os.path.basename(local_path)} ({file_size} bytes)"
+        )
+        return True
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "Unknown")
+        logger.error(f"Failed to upload to S3: {error_code} - {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error uploading to S3: {str(e)}")
+        return False
+
+
+def upload_all_results(s3_paths: Dict[str, str], config: Dict) -> bool:
+    """
+    Upload all result files to S3 (lookback stats and forecast output).
 
     Args:
         s3_paths: Dictionary of S3 URIs
         config: Configuration dictionary
-        skip_model: If True, skip downloading model vault
 
     Returns:
         True if successful, False otherwise
@@ -140,57 +181,40 @@ def download_all_data(
 
     local_paths = config.get("local_paths", {})
     model_dir = local_paths.get("model_dir", "/mnt/model")
-    forcing_dir = local_paths.get("forcing_dir", "/mnt/model/forcing")
-    observations_dir = local_paths.get("observations_dir", "/mnt/model/observations")
+    results_dir = os.path.join(model_dir, "results")
 
-    # Create directories
-    os.makedirs(model_dir, exist_ok=True)
-    os.makedirs(forcing_dir, exist_ok=True)
-    os.makedirs(observations_dir, exist_ok=True)
-
-    # Download and unpack model vault
-    if not skip_model:
-        logger.info(f"MODEL      | source: {s3_paths['model_vault']}")
-        success = unpack_modelvault(s3_paths["model_vault"], model_dir, logger)
-        if not success:
-            logger.error("Failed to download and unpack model vault")
-            return False
-        logger.debug("DATA       | modelvault downloaded and unpacked successfully")
-    else:
-        logger.info("DATA       | modelvault download skipped (--skip-model flag)")
-
-    # Download forcing data
-    forcing_files = [
-        ("hrrr_qpf.nc", s3_paths["forcing_qpf"]),
-        ("rtma_temp.nc", s3_paths["forcing_temp"]),
-        ("mrms_qpe.nc", s3_paths["forcing_qpe"]),
+    # Define local result files
+    result_files = [
+        ("stats.parquet", "lookback_stats"),
+        ("forecast.parquet", "forecast_output"),
     ]
 
-    for filename, s3_uri in forcing_files:
-        output_path = os.path.join(forcing_dir, filename)
-        logger.info(f"DATA       | forcing: {s3_uri}")
-        if not download_s3_file(s3_uri, output_path, logger):
-            logger.error(f"Failed to download forcing file: {filename}")
-            return False
-        logger.debug(f"Successfully downloaded {filename}")
+    all_success = True
+    for filename, s3_key in result_files:
+        local_path = os.path.join(results_dir, filename)
 
-    # Download observations
-    obs_filename = "gages.dss"
-    obs_output_path = os.path.join(observations_dir, obs_filename)
-    logger.info(f"DATA       | observations: {s3_paths['observations']}")
-    if not download_s3_file(s3_paths["observations"], obs_output_path, logger):
-        logger.error("Failed to download observations file")
-        return False
-    logger.debug("Successfully downloaded observations")
+        if not os.path.exists(local_path):
+            logger.warning(f"Result file not found, skipping: {local_path}")
+            continue
+        logger.info(f"DATA       | uploading {s3_paths[s3_key]}")
+        if not upload_s3_file(local_path, s3_paths[s3_key], logger):
+            logger.error(f"Failed to upload result file: {filename}")
+            all_success = False
+        else:
+            logger.debug(f"{filename} uploaded successfully")
 
-    logger.debug("All data downloaded successfully")
-    return True
+    if all_success:
+        logger.debug("All results uploaded successfully")
+    else:
+        logger.error("Some results failed to upload")
+
+    return all_success
 
 
 def main():
-    """Main entry point for data download."""
+    """Main entry point for results upload."""
     parser = argparse.ArgumentParser(
-        description="Download HMS forecast model and data from S3",
+        description="Upload HMS forecast results to S3",
         epilog="Available modes: test, validation1, validation2, validation3",
     )
     parser.add_argument(
@@ -201,19 +225,15 @@ def main():
     )
     parser.add_argument(
         "--config",
+        type=str,
         default="/app/config.yaml",
-        help="Path to configuration file (default: /app/config.yaml)",
-    )
-    parser.add_argument(
-        "--skip-model",
-        action="store_true",
-        help="Skip downloading model vault (useful if model is already present)",
+        help="Path to configuration YAML file (default: /app/config.yaml)",
     )
 
     args = parser.parse_args()
 
     logger = setup_json_logging()
-    logger.debug("Starting data download [step=download_data]")
+    logger.debug("Starting results upload to S3")
 
     # Load configuration
     config = load_config(args.config)
@@ -224,21 +244,14 @@ def main():
     # Construct S3 paths
     s3_paths = construct_s3_paths(config, dt_values)
 
-    # Log the paths we'll be downloading from
-    logger.debug(f"Model vault: {s3_paths['model_vault']}")
-    logger.debug(f"Forcing QPF: {s3_paths['forcing_qpf']}")
-    logger.debug(f"Forcing Temp: {s3_paths['forcing_temp']}")
-    logger.debug(f"Forcing QPE: {s3_paths['forcing_qpe']}")
-    logger.debug(f"Observations: {s3_paths['observations']}")
-
-    # Download all data
-    success = download_all_data(s3_paths, config, args.skip_model)
+    # Upload results
+    success = upload_all_results(s3_paths, config)
 
     if success:
-        logger.debug("Data download completed successfully [step=download_data]")
+        logger.debug("Results upload completed successfully")
         return 0
     else:
-        logger.error("Data download failed [step=download_data]")
+        logger.debug("Results upload failed")
         return 1
 
 

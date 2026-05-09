@@ -396,7 +396,7 @@ public class RunHMS {
 
             closeMethod.invoke(project);
 
-            logger.info("Completed HMS simulation: model='" + hmsFilePath + "', simulation='" + simulationName + "'");
+            logger.info("SIMULATION | completed: model='" + hmsFilePath + "', simulation='" + simulationName + "'");
             return 0;
 
         } catch (NoSuchMethodException e) {

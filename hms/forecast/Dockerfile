@@ -28,7 +28,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY src/ /usr/local/bin/
 COPY config.yaml /app/config.yaml
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/run.py /usr/local/bin/parse_results_stats.py /usr/local/bin/download_data.py
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/run.py /usr/local/bin/parse_results_stats.py /usr/local/bin/download_data.py /usr/local/bin/upload_results.py
 
 WORKDIR /app
 RUN rm -rf /app/.venv && \

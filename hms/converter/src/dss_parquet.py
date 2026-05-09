@@ -8,8 +8,10 @@ from hecdss import HecDss, RegularTimeSeries
 
 try:
     from src.validate import load_json_schema
+    from src.datehandler import infer_interval_from_timestamps
 except ModuleNotFoundError:
     from validate import load_json_schema
+    from datehandler import infer_interval_from_timestamps
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +180,23 @@ def parquet_to_dss(
 
                 logger.debug(f"First time: {times[0]}, First value: {values[0]}")
 
+                # Determine interval: use E part if present, otherwise auto-detect
+                # Note: interval detection is per unique group (provider/site_id/variable combination)
+                interval = path_parts.get("E", None)
+                if interval is None or interval == "":
+                    # Auto-detect interval from timestamps for this specific group
+                    detected_interval = infer_interval_from_timestamps(times)
+                    if detected_interval is None:
+                        logger.warning(
+                            f"Could not detect interval for {dss_path}, defaulting to 15Minute"
+                        )
+                        interval = "15Minute"
+                    else:
+                        logger.info(
+                            f"Auto-detected interval: {detected_interval} for {dss_path}"
+                        )
+                        interval = detected_interval
+
                 # Write to DSS using RegularTimeSeries
                 try:
                     # Create a RegularTimeSeries object
@@ -186,9 +205,7 @@ def parquet_to_dss(
                         values=values,
                         times=times,  # Pass datetime array
                         start_date=times[0],
-                        interval=path_parts.get(
-                            "E", "15MIN"
-                        ),  # Use interval from E part
+                        interval=interval,
                         units="CFS",
                         data_type="INST-VAL",
                         path=dss_path,

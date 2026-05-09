@@ -6,9 +6,10 @@ Convert HEC-DSS files to/from Parquet format for efficient data processing and s
 
 - **DSS to Parquet**: Extract time series data from HEC-DSS files into columnar Parquet format
 - **Parquet to DSS**: Convert Parquet data back to HEC-DSS format
-- **Iceberg Schema Support**: Default export uses semantic column names (timestamp, provider, site_id, variable, increment, qualifier)
-- **DSS Schema Support**: Optional generic DSS column names (datetime, A, B, C, E, F) with `--no-iceberg-schema`
+- **Iceberg Schema Support**: Default export uses semantic column names (timestamp, provider, site_id, variable, qualifier)
+- **DSS Schema Support**: Optional generic DSS column names (datetime, A, B, C, F) with `--no-iceberg-schema`
 - **Smart D Part Handling**: D part (date range) excluded from exports and auto-generated during imports
+- **Smart E Part Handling**: E part (increment) excluded from exports by default, auto-detected from timestamps during imports
 - **Structured JSON logging**: All logs in machine-readable JSON format (quiet by default)
 - **Configurable grouping**: Group data by DSS path parts (default: F part)
 - **Parallel processing**: Multi-threaded conversion for large datasets
@@ -56,7 +57,7 @@ Convert DSS file to Parquet format.
 - `-o, --output` - Output Parquet file path (default: `input_name.parquet`)
 - `--groupby` - DSS path part to group by (default: `F`)
 - `--no-strip-suffix` - Do not strip version suffix from group keys
-- `--include-parts` - Additional DSS path parts to include beyond A, B, C (default: `E F`)
+- `--include-parts` - Additional DSS path parts to include beyond A, B, C (default: `F`; E is auto-detected on import)
 - `--no-iceberg-schema` - Use generic DSS column names (A, B, C, etc.) instead of semantic names
 - `--group-workers` - Number of workers for group export (default: `4`)
 - `--dss-workers` - Number of workers for DSS file processing (default: `1`)
@@ -68,14 +69,16 @@ Convert DSS file to Parquet format.
 **Schema Formats:**
 
 *Iceberg Schema (default):*
-- Semantic column names: `timestamp`, `value`, `provider`, `site_id`, `variable`, `increment`, `qualifier`
-- Maps DSS parts: A→provider, B→site_id, C→variable, E→increment, F→qualifier
+- Semantic column names: `timestamp`, `value`, `provider`, `site_id`, `variable`, `qualifier`
+- Maps DSS parts: A→provider, B→site_id, C→variable, F→qualifier
 - D part (date range) excluded - auto-generated during import
+- E part (increment) excluded by default - auto-detected from timestamps during import
 
 *DSS Schema (with `--no-iceberg-schema`):*
-- Generic column names: `datetime`, `value`, `A`, `B`, `C`, `E`, `F`
+- Generic column names: `datetime`, `value`, `A`, `B`, `C`, `F`
 - Direct DSS path part names
 - D part excluded - auto-generated during import
+- E part excluded by default - auto-detected from timestamps during import
 
 **Example (Iceberg Schema - default):**
 ```bash
@@ -131,21 +134,24 @@ The D part of DSS paths (date range) is intentionally **excluded** from Parquet 
 ```
 Original:   /TRINITY RV/OAKWOOD TX/FLOW/01Feb2026-28Feb2026/15Minute/USGS/
 Export:     timestamp, value, provider="TRINITY RV", site_id="OAKWOOD TX",
-            variable="FLOW", increment="15Minute", qualifier="USGS"
-            (no D column)
+            variable="FLOW", qualifier="USGS"
+            (no D or E columns by default)
 Import:     /TRINITY RV/OAKWOOD TX/FLOW/01Feb2026-28Feb2026/15Minute/USGS/
-            (D part auto-generated from timestamps)
+            (D part auto-generated from timestamps, E part auto-detected from interval)
 ```
 
-## Legacy Mode
+### E Part Handling
 
-For backwards compatibility, you can run without a subcommand:
+The E part of DSS paths (time interval) is by default **excluded** from Parquet exports and **auto-detected** during imports:
 
-```bash
-docker run -v $(pwd):/data hmsbox-dss:latest /data/input.dss
-```
+- **Why excluded?** The E part (e.g., "15Minute", "1Hour") can be reliably inferred from the timestamp spacing in the time series
+- **Export behavior:** E column is not included in Parquet files by default (saves space, ensures consistency)
+- **Import behavior:** E part is automatically detected by analyzing timestamp intervals for each unique provider/site_id/variable combination
+- **Per-variable detection:** Each variable can have its own interval (e.g., 15-minute FLOW and 1-hour STAGE at same site)
+- **Manual override:** Use `--include-parts E F` to explicitly include E in exports if needed
 
-This defaults to `dss-to-parquet` mode.
+**Supported Intervals:**
+The auto-detection supports 35 DSS time intervals from `1Year` down to `1Second`, including common intervals like `1Day`, `1Hour`, `15Minute`, etc.
 
 ## Output Format
 

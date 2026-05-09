@@ -144,8 +144,8 @@ def _main_impl() -> int:
     dss_to_pq.add_argument(
         "--include-parts",
         nargs="+",
-        default=["E", "F"],
-        help="Additional DSS path parts to include beyond required A, B, C (default: E F; D is always excluded and auto-generated on import)",
+        default=["F"],
+        help="Additional DSS path parts to include beyond required A, B, C (default: F; D is always excluded and auto-generated on import; E is auto-detected from timestamps on import)",
     )
     dss_to_pq.add_argument(
         "--group-workers",

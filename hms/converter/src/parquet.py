@@ -458,7 +458,7 @@ def run(
         output_path: Output file path for Parquet file
         groupby: DSS path part to group by (default: "F")
         strip_suffix: Strip version suffix from group keys (default: True)
-        include_parts: DSS path parts to include as columns (default: ["E", "F"])
+        include_parts: DSS path parts to include as columns (default: ["F"])
         group_workers: Number of workers for group export parallelization (default: 4)
         dss_workers: Number of workers for DSS file parallelization (default: 1)
         event_id: Optional event ID to include in output
@@ -469,7 +469,7 @@ def run(
         Manifest dict with export results
     """
     if include_parts is None:
-        include_parts = ["E", "F"]
+        include_parts = ["F"]
 
     # Set global debug level for HecDss library (0 = minimal output, 1 = verbose)
     HecDss.set_global_debug_level(0 if suppress_dss_output else 1)

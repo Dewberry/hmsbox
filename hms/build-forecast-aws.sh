@@ -17,7 +17,11 @@ set -e
 #   ./build-forecast-lambda.sh 4.14-beta.1 my-prod-bucket
 
 HMS_VERSION="${1:-4.14-beta.1}"
-S3_BUCKET="${2:-}"
+S3_BUCKET="${2:-flood-warning}"
+ACCOUNT_ID="141287515476" # TODO: replace with actual AWS account ID
+LAMBDA_VERSION=v0.1.12
+ECS_VERSION=v0.1.0
+
 
 echo "Building HMS Forecast Lambda container with HMS version ${HMS_VERSION}..."
 if [ -n "$S3_BUCKET" ]; then
@@ -38,32 +42,49 @@ if ! docker image inspect hmsbox-converter:latest &> /dev/null; then
     exit 1
 fi
 
-version=v0.1.6
 
 # Build docker command with optional S3_BUCKET arg
-BUILD_ARGS="--build-arg HMS_VERSION=${HMS_VERSION} --build-arg BUILD_VERSION=${version}"
+BUILD_ARGS="--build-arg HMS_VERSION=${HMS_VERSION} --build-arg BUILD_VERSION=${LAMBDA_VERSION}"
 if [ -n "$S3_BUCKET" ]; then
     BUILD_ARGS="${BUILD_ARGS} --build-arg S3_BUCKET=${S3_BUCKET}"
 fi
 
 # Build the Lambda image
 docker build \
+    --no-cache \
     --platform linux/amd64 \
     --provenance=false \
     --sbom=false \
     ${BUILD_ARGS} \
     -f forecast/Dockerfile.lambda \
-    -t <accountid>.dkr.ecr.us-east-1.amazonaws.com/hmsbox-forecast:lambda-${HMS_VERSION}-${version} \
-    -t <accountid>.dkr.ecr.us-east-1.amazonaws.com/hmsbox-forecast:lambda-latest \
+    -t ${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/hmsbox-forecast:lambda-${HMS_VERSION}-${LAMBDA_VERSION} \
     forecast/
 
 echo ""
-echo "Build complete!"
+echo "Lambda build complete!"
 if [ -n "$S3_BUCKET" ]; then
     echo "Image configured for S3 bucket: ${S3_BUCKET}"
 else
     echo "Image requires HMS_S3_BUCKET environment variable at runtime"
 fi
 
-docker push <accountid>.dkr.ecr.us-east-1.amazonaws.com/hmsbox-forecast:lambda-${HMS_VERSION}-${version}
-docker push <accountid>.dkr.ecr.us-east-1.amazonaws.com/hmsbox-forecast:lambda-latest
+docker push ${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/hmsbox-forecast:lambda-${HMS_VERSION}-${LAMBDA_VERSION}
+
+# Build the ECS image
+docker build \
+    --no-cache \
+    --platform linux/amd64 \
+    ${BUILD_ARGS} \
+    -f forecast/Dockerfile \
+    -t ${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/hmsbox-forecast:ecs-${HMS_VERSION}-${ECS_VERSION} \
+    forecast/
+
+echo ""
+echo "ECS build complete!"
+if [ -n "$S3_BUCKET" ]; then
+    echo "Image configured for S3 bucket: ${S3_BUCKET}"
+else
+    echo "Image requires HMS_S3_BUCKET environment variable at runtime"
+fi
+
+docker push ${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/hmsbox-forecast:ecs-${HMS_VERSION}-${ECS_VERSION}

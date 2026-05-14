@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 
 import argparse
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-from forecast_time import ensure_control_file_from_map
 from forecast_logging import setup_json_logging
-import logging
+from forecast_time import ensure_control_file_from_map
 
 __version__ = "0.1.0"
+
+_SCRIPT_DIR = Path(__file__).parent
 
 # Logger will be reconfigured in main() based on --debug flag
 logger = setup_json_logging()
@@ -52,7 +54,7 @@ def _resolve_python_command(
     if command in {"parse-results-stats", "parse_results_stats"}:
         return [
             str(python_bin),
-            "/usr/local/bin/parse_results_stats.py",
+            str(_SCRIPT_DIR / "parse_results_stats.py"),
             *python_args[1:],
         ], "results_stats"
 
@@ -153,7 +155,7 @@ def _run_download(
     """Run data download from S3."""
     logger.debug("Running download entrypoint [step=download]")
 
-    download_cmd = ["python3", "/usr/local/bin/download_data.py"]
+    download_cmd = ["python3", str(_SCRIPT_DIR / "download_data.py")]
     if mode:
         download_cmd.extend(["--mode", mode])
     if skip_model:
@@ -178,7 +180,7 @@ def _run_upload(mode: str, json_logs_only: bool, debug_mode: bool = False) -> in
     """Run results upload to S3."""
     logger.debug("Running upload entrypoint [step=upload]")
 
-    upload_cmd = ["python3", "/usr/local/bin/upload_results.py"]
+    upload_cmd = ["python3", str(_SCRIPT_DIR / "upload_results.py")]
     if mode:
         upload_cmd.extend(["--mode", mode])
 

@@ -1,6 +1,6 @@
 # Build arguments
 ARG HMS_VERSION=4.14-beta.1
-ARG BUILD_VERSION=0.1.0
+ARG BUILD_VERSION
 ARG S3_BUCKET
 
 # Build stage for modelvault binary
@@ -34,6 +34,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Copy forecast source and Lambda-specific config
 COPY src/ /var/task/
+COPY lambda_handler.py /var/task/
 COPY config.lambda.yaml /app/config.yaml
 
 # Substitute S3_BUCKET at build time if provided
@@ -59,6 +60,7 @@ RUN chown -R hms:hms /app /opt/uv-python /var/task && \
 ENV PATH="/app/.venv/bin:$PATH" \
 	PYTHONUNBUFFERED=1 \
 	LAMBDA_TASK_ROOT=/var/task \
+	PYTHONPATH=/var/task \
 	BUILD_VERSION=${BUILD_VERSION} \
 	HMS_VERSION=${HMS_VERSION}
 

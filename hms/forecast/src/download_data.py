@@ -193,6 +193,22 @@ def download_all_data(
             logger.error("Failed to download and unpack model vault")
             return False
         logger.debug("DATA       | modelvault downloaded and unpacked successfully")
+
+        # Ensure HMS subdirectories exist — modelvault skips empty dirs,
+        # but HMS needs these to write lock files, state, and results.
+        hms_subdirs = [
+            "results",
+            "basinStates",
+            "forecast",
+            "datavar",
+            "ensemble",
+            "montecarlo",
+            "optimizer",
+            "frequency",
+        ]
+        for subdir in hms_subdirs:
+            os.makedirs(os.path.join(model_dir, subdir), exist_ok=True)
+        logger.debug("DATA       | HMS subdirectories ensured")
     else:
         logger.info("DATA       | modelvault download skipped (--skip-model flag)")
 

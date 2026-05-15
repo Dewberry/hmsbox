@@ -295,6 +295,12 @@ def parse_args() -> argparse.Namespace:
         help="Python args to run after forecast simulation (optional, defaults to: dss-to-parquet {model_dir}/Forecast.dss -o {model_dir}/results/forecast.parquet)",
     )
     parser.add_argument(
+        "--lookback-dss-python-args",
+        nargs="*",
+        default=None,
+        help="Python args to export Lookback DSS after forecast simulation (optional, defaults to: dss-to-parquet {model_dir}/Lookback.dss -o {model_dir}/results/lookback.parquet). Pass empty list to skip.",
+    )
+    parser.add_argument(
         "--python-args",
         nargs=argparse.REMAINDER,
         default=[],
@@ -469,6 +475,30 @@ def main() -> int:
             )
             return forecast_python_status
         logger.info("PROCESSING | data conversion python processing completed")
+
+        # Run Lookback DSS to parquet export
+        default_lookback_dss_python_args = [
+            "dss-to-parquet",
+            f"{model_dir}/Lookback.dss",
+            "-o",
+            f"{model_dir}/results/lookback.parquet",
+        ]
+        lookback_dss_python_args = (
+            args.lookback_dss_python_args
+            if args.lookback_dss_python_args is not None
+            else default_lookback_dss_python_args
+        )
+        if lookback_dss_python_args:
+            logger.info("PROCESSING | export: lookback dss to parquet")
+            lookback_dss_status = _run_python(
+                lookback_dss_python_args, json_logs_only, debug_mode
+            )
+            if lookback_dss_status != 0:
+                logger.error(
+                    f"Lookback DSS export failed [exit_code={lookback_dss_status}]"
+                )
+                return lookback_dss_status
+            logger.debug("lookback DSS export completed")
 
     else:
         # Single-run mode (legacy behavior)

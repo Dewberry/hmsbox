@@ -2,25 +2,8 @@
 
 set -euo pipefail
 
-# Build HMS Forecast container
-#
-# Usage:
-#   ./build-forecast.sh [S3_BUCKET]
-#
-# Arguments:
-#   S3_BUCKET   - S3 bucket name to bake into image (optional)
-#                 If not provided, HMS_S3_BUCKET env var required at runtime
-#
-# Environment Variables:
-#   HMS_VERSION - HEC-HMS version (default: 4.14-beta.1)
-#
-# Examples:
-#   ./build-forecast.sh
-#   ./build-forecast.sh my-prod-bucket
-#   HMS_VERSION=4.14-beta.2 ./build-forecast.sh my-bucket
-
 HMS_VERSION="${HMS_VERSION:-4.14-beta.1}"
-S3_BUCKET="${1:-}"
+S3_BUCKET="${1:-flood-warning}"
 IMAGE="hmsbox-forecast:${HMS_VERSION}"
 
 HOST_MODEL_DIR=./model
@@ -32,19 +15,21 @@ FORECAST_START="${FORECAST_START:-2026-03-11T01:00:00Z}"
 RUNTIME_PARAMS="{\"forecast_start\":\"${FORECAST_START}\",\"control_type\":\"Lookback\"}"
 
 FORECAST_DSS_PATH="${CONTAINER_MODEL_DIR}/Forecast.dss"
+LOOKBACK_DSS_PATH="${CONTAINER_MODEL_DIR}/Lookback.dss"
 FORECAST_PQ_PATH="${CONTAINER_MODEL_DIR}/results/Forecast-${FORECAST_START:0:13}.parquet"
+LOOKBACK_PQ_PATH="${CONTAINER_MODEL_DIR}/results/Lookback-${FORECAST_START:0:13}.parquet"
 
 LOOKBACK_STATS_XML_PATH="${CONTAINER_MODEL_DIR}/results/RUN_Lookback.results"
 LOOKBACK_STATS_PQ_PATH="${CONTAINER_MODEL_DIR}/results/Skill-${FORECAST_START:0:13}.parquet"
 
-echo "Building HMS Forecast container with HMS version ${HMS_VERSION}..."
-if [ -n "$S3_BUCKET" ]; then
-    echo "S3 bucket will be baked into image: ${S3_BUCKET}"
-    docker build -t "$IMAGE" --build-arg HMS_VERSION="$HMS_VERSION" --build-arg S3_BUCKET="$S3_BUCKET" ./forecast
-else
-    echo "No S3 bucket specified - HMS_S3_BUCKET environment variable will be required at runtime"
-    docker build -t "$IMAGE" --build-arg HMS_VERSION="$HMS_VERSION" ./forecast
-fi
+# echo "Building HMS Forecast container with HMS version ${HMS_VERSION}..."
+# if [ -n "$S3_BUCKET" ]; then
+#     echo "S3 bucket will be baked into image: ${S3_BUCKET}"
+#     docker build -t "$IMAGE" --build-arg HMS_VERSION="$HMS_VERSION" --build-arg S3_BUCKET="$S3_BUCKET" ./forecast
+# else
+#     echo "No S3 bucket specified - HMS_S3_BUCKET environment variable will be required at runtime"
+#     docker build -t "$IMAGE" --build-arg HMS_VERSION="$HMS_VERSION" ./forecast
+# fi
 
 echo ""
 echo "Build complete!"
@@ -58,6 +43,7 @@ echo ""
 docker run --rm \
     -v $HOST_MODEL_DIR:$CONTAINER_MODEL_DIR \
     -e "params=${RUNTIME_PARAMS}" \
+    -e HMS_S3_BUCKET="$S3_BUCKET" \
     $IMAGE \
     $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME \
     "Lookback" \
@@ -67,7 +53,9 @@ docker run --rm \
 docker run --rm \
     -v $HOST_MODEL_DIR:$CONTAINER_MODEL_DIR \
     -e "params=${RUNTIME_PARAMS}" \
+    -e HMS_S3_BUCKET="$S3_BUCKET" \
     $IMAGE \
     $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME \
     "Forecast" \
-    --python-args dss-to-parquet $FORECAST_DSS_PATH -o $FORECAST_PQ_PATH
+    --python-args dss-to-parquet $FORECAST_DSS_PATH -o $FORECAST_PQ_PATH \
+    --python-args dss-to-parquet $LOOKBACK_DSS_PATH -o $LOOKBACK_PQ_PATH

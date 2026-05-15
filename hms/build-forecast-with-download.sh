@@ -4,6 +4,7 @@
 set -e  # Exit on error
 
 IMAGE=hmsbox-forecast:4.14-beta.1
+HMS_S3_BUCKET="${1:-flood-warning}"  # S3 bucket can be passed as an argument, defaults to 'flood-warning'
 
 # Build the image (if not already built)
 docker build -t $IMAGE ./forecast
@@ -12,6 +13,9 @@ HOST_MODEL_DIR=./model
 CONTAINER_MODEL_DIR=/mnt/model
 
 HMS_MODEL_NAME=Trinity_Forecast.hms
+
+FORECAST_DSS_PATH="${CONTAINER_MODEL_DIR}/Forecast.dss"
+LOOKBACK_DSS_PATH="${CONTAINER_MODEL_DIR}/Lookback.dss"
 
 # Test 1: Download data using test mode (March 11, 2026)
 # Runs Lookback simulation followed by Forecast simulation (default behavior)
@@ -22,6 +26,7 @@ HMS_MODEL_NAME=Trinity_Forecast.hms
 
 docker run --rm \
     -v $HOST_MODEL_DIR:$CONTAINER_MODEL_DIR \
+    -e HMS_S3_BUCKET="$HMS_S3_BUCKET" \
     $IMAGE --mode test \
     $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME
 

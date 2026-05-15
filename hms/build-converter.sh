@@ -2,10 +2,10 @@
 
 IMAGE=hmsbox-converter:latest
 
-docker build -t $IMAGE ./converter #--no-cache
+# docker build -t $IMAGE ./converter #--no-cache
 
-HOST_DATA_DIR=./data
-DSS_DATA_INPUT_FILE=USGS_flows.dss
+HOST_DATA_DIR=./model/observations
+DSS_DATA_INPUT_FILE=gages.dss
 PARQUET_DATA_INPUT_FILE=test.parquet
 
 CONTAINER_DATA_DIR=/mnt/data

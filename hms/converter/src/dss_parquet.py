@@ -3,15 +3,16 @@
 import logging
 from pathlib import Path
 
+import pandas as pd
 import pyarrow.parquet as pq
 from hecdss import HecDss, RegularTimeSeries
 
 try:
-    from src.validate import load_json_schema
     from src.datehandler import infer_interval_from_timestamps
+    from src.validate import load_json_schema
 except ModuleNotFoundError:
-    from validate import load_json_schema
     from datehandler import infer_interval_from_timestamps
+    from validate import load_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,12 @@ def _normalize_parquet(df, field_mapping: dict) -> tuple:
         rename_map[semantic_col] = dss_part
 
     df_normalized = df.rename(columns=rename_map)
+
+    # Add missing DSS parts with default values
+    if "A" not in df_normalized.columns and "provider" in field_mapping:
+        logger.debug("Adding missing provider (A) column with empty strings")
+        df_normalized["A"] = ""
+
     return df_normalized, used_mapping
 
 
@@ -55,16 +62,32 @@ def _validate_parquet_columns(parquet_path: str) -> tuple[list[str], dict]:
     # Get field mapping from iceberg schema
     field_mapping = ICEBERG_SCHEMA.get("fieldMapping", {})
 
-    # Check if we have semantic column names (iceberg format)
-    iceberg_required = set(ICEBERG_SCHEMA.get("required", []))
-    has_semantic_columns = iceberg_required.issubset(columns)
+    # Core iceberg semantic columns (timestamp, value, site_id, variable)
+    # Provider is optional if not present
+    core_semantic_cols = {"timestamp", "value", "site_id", "variable"}
+    optional_semantic_cols = {"provider"}
 
-    if has_semantic_columns:
+    # Check if we have semantic column names (iceberg format)
+    has_core_semantic = core_semantic_cols.issubset(columns)
+
+    if has_core_semantic:
         # Will normalize from semantic names to DSS parts
         logger.debug(
             "Detected iceberg-style semantic column names, will normalize to DSS parts"
         )
-        return list(field_mapping.values()), field_mapping
+
+        # Build the active field mapping based on what's present
+        active_mapping = {}
+        for semantic_col, dss_part in field_mapping.items():
+            if semantic_col in columns:
+                active_mapping[semantic_col] = dss_part
+
+        # Add provider as optional - if missing, it will be filled with empty string
+        if "provider" not in columns and "provider" in field_mapping:
+            logger.debug("Provider column missing from parquet, will use empty string")
+            active_mapping["provider"] = field_mapping["provider"]
+
+        return list(active_mapping.values()), active_mapping
     else:
         # Expect generic DSS column names already (A, B, C, D, E, F, datetime, value)
         required_fields = set(DSS_SCHEMA.get("required", []))
@@ -110,6 +133,11 @@ def parquet_to_dss(
 
     logger.debug(f"Loaded parquet with {len(df)} records")
 
+    # Convert datetime column to datetime type if it's a string
+    if "datetime" in df.columns and df["datetime"].dtype == "object":
+        logger.debug("Converting datetime column from string to datetime")
+        df["datetime"] = pd.to_datetime(df["datetime"])
+
     # Get required DSS parts from schema
     required_dss_parts = [
         part
@@ -128,13 +156,16 @@ def parquet_to_dss(
 
     # Fill missing values in all DSS parts
     for part in dss_parts:
+        if part not in df.columns:
+            df[part] = ""
         df[part] = df[part].fillna("")
 
-    # Group by DSS path combination
-    groupby_cols = dss_parts
-    if not groupby_cols:
-        logger.error(f"No DSS path parts found in parquet")
-        return {"error": "No DSS path parts found", "converted": 0}
+    # Group by DSS path combination - use only A, B, C for grouping
+    # (these are the semantic parts that define unique time series)
+    groupby_cols = ["A", "B", "C"]
+    if not all(col in df.columns for col in groupby_cols):
+        logger.error(f"Missing required groupby columns: {groupby_cols}")
+        return {"error": "Missing required DSS path parts", "converted": 0}
 
     # Create output directory
     Path(output_dss_path).parent.mkdir(parents=True, exist_ok=True)
@@ -144,38 +175,35 @@ def parquet_to_dss(
         with HecDss(output_dss_path) as dss:
             converted_count = 0
 
-            # Group data by unique path combinations
+            # Group data by unique A/B/C combinations
             for group_vals, group_data in df.groupby(groupby_cols, sort=False):
                 if not isinstance(group_vals, tuple):
                     group_vals = (group_vals,)
 
-                # Build DSS path
+                # Build DSS path parts dictionary from groupby values
+                # groupby_cols = ["A", "B", "C"], so order is preserved
                 path_parts = {
                     col: str(val) for col, val in zip(groupby_cols, group_vals)
                 }
-
-                # Get F part from data or use override
-                # If no F part is provided and no qualifier in data, use E part (interval) as F part
-                f_part = path_f_part or path_parts.get("F", path_parts.get("E", ""))
-
-                # Build full DSS path: /A/B/C/D/E/F/
-                dss_path = (
-                    f"/{path_parts.get('A', '')}/{path_parts.get('B', '')}/"
-                    + f"{path_parts.get('C', '')}/{path_parts.get('D', '')}/"
-                    + f"{path_parts.get('E', '')}/{f_part}/"
-                )
-                dss_path = dss_path.strip("/")
-                dss_path = f"/{dss_path}/"
-
-                logger.info(
-                    f"Writing DSS path: {dss_path} with {len(group_data)} records"
-                )
+                # Add D, E, F parts if they exist in data (take first value from group since they might be constant)
+                if "D" in df.columns:
+                    path_parts["D"] = (
+                        str(group_data["D"].iloc[0]) if len(group_data) > 0 else ""
+                    )
+                if "E" in df.columns:
+                    path_parts["E"] = (
+                        str(group_data["E"].iloc[0]) if len(group_data) > 0 else ""
+                    )
+                if "F" in df.columns:
+                    path_parts["F"] = (
+                        str(group_data["F"].iloc[0]) if len(group_data) > 0 else ""
+                    )
 
                 # Sort by datetime
                 group_data = group_data.sort_values("datetime")
 
-                # Convert to times and values
-                times = group_data["datetime"].tolist()
+                # Convert to times and values - ensure times are datetime objects
+                times = pd.to_datetime(group_data["datetime"].tolist()).tolist()
                 values = group_data["value"].tolist()
 
                 logger.debug(f"First time: {times[0]}, First value: {values[0]}")
@@ -188,14 +216,36 @@ def parquet_to_dss(
                     detected_interval = infer_interval_from_timestamps(times)
                     if detected_interval is None:
                         logger.warning(
-                            f"Could not detect interval for {dss_path}, defaulting to 15Minute"
+                            f"Could not detect interval for group {path_parts}, defaulting to 15Minute"
                         )
                         interval = "15Minute"
                     else:
                         logger.info(
-                            f"Auto-detected interval: {detected_interval} for {dss_path}"
+                            f"Auto-detected interval: {detected_interval} for group {path_parts}"
                         )
                         interval = detected_interval
+                    path_parts["E"] = interval
+
+                # Get F part from data or use override
+                # If no F part is provided and no qualifier in data, use E part (interval) as F part
+                f_part = path_f_part or path_parts.get("F", path_parts.get("E", ""))
+
+                # Build full DSS path: /A/B/C/D/E/F/ preserving structure
+                # Ensure all 6 parts are present as positional elements
+                a_part = path_parts.get("A", "")
+                b_part = path_parts.get("B", "")
+                c_part = path_parts.get("C", "")
+                d_part = path_parts.get("D", "")
+                e_part = path_parts.get("E", "")
+                f_part_final = f_part
+
+                dss_path = (
+                    f"/{a_part}/{b_part}/{c_part}/{d_part}/{e_part}/{f_part_final}/"
+                )
+
+                logger.info(
+                    f"Writing DSS path: {dss_path} with {len(group_data)} records"
+                )
 
                 # Write to DSS using RegularTimeSeries
                 try:

@@ -7,10 +7,12 @@ IMAGE=hmsbox-forecast:4.14-beta.1
 HMS_S3_BUCKET="${1:-flood-warning}"  # S3 bucket can be passed as an argument, defaults to 'flood-warning'
 
 # Build the image (if not already built)
-docker build -t $IMAGE ./forecast
+# docker build -t $IMAGE ./forecast
 
-HOST_MODEL_DIR=./model
+# HOST_MODEL_DIR=./model
+HOST_MODEL_DIR=/home/ubuntu/pilot/hmsbox/model/
 CONTAINER_MODEL_DIR=/mnt/model
+LOCAL_CONFIG=./forecast/config.yaml
 
 HMS_MODEL_NAME=Trinity_Forecast.hms
 
@@ -24,11 +26,11 @@ LOOKBACK_DSS_PATH="${CONTAINER_MODEL_DIR}/Lookback.dss"
 #   - Lookback stats: /mnt/model/results/stats.parquet
 #   - Forecast output: /mnt/model/results/forecast.parquet
 
-docker run --rm \
-    -v $HOST_MODEL_DIR:$CONTAINER_MODEL_DIR \
-    -e HMS_S3_BUCKET="$HMS_S3_BUCKET" \
-    $IMAGE --mode test \
-    $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME
+# docker run --rm \
+#     -v $HOST_MODEL_DIR:$CONTAINER_MODEL_DIR \
+#     -e HMS_S3_BUCKET="$HMS_S3_BUCKET" \
+#     $IMAGE --mode test \
+#     $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME
 
 # Test 2: Download data using validation1 mode (August 21, 2022)
 # docker run --rm \
@@ -48,11 +50,15 @@ docker run --rm \
 #     $IMAGE --mode test --skip-model \
 #     $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME
 
-# Test 5: Run without downloading (assumes data is already in place)
-# docker run --rm \
-#     -v $HOST_MODEL_DIR:$CONTAINER_MODEL_DIR \
-#     $IMAGE --no-download \
-#     $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME
+# Option 5: Run without downloading (assumes data is already in place)
+docker run --rm \
+    -v $HOST_MODEL_DIR:$CONTAINER_MODEL_DIR \
+    -v $LOCAL_CONFIG:/app/config.yaml \
+    -e HMS_S3_BUCKET="$HMS_S3_BUCKET" \
+    $IMAGE \
+    --mode test \
+    --no-upload \
+    $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME
 
 if [ $? -eq 0 ]; then
     echo ""

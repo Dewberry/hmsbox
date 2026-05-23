@@ -2,7 +2,8 @@
 # This file defines the S3 paths for model vault, forcing data, and observations
 
 # Model version to use
-model_version: "trinity-v20260509"
+# model_version: "trinity-v20260509"
+model_version: "trinity-v20260522.1"
 
 # S3 path templates - {year}, {month}, {day}, {hour} will be replaced with actual values
 # {S3_BUCKET} will be replaced with HMS_S3_BUCKET environment variable (required)
@@ -16,8 +17,8 @@ s3_paths:
     temp: "s3://{S3_BUCKET}/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/rtma_temp.nc"
     qpe: "s3://{S3_BUCKET}/staging/temporary/forcing/{year}/{month:02d}/{day:02d}/{hour:02d}/mrms_qpe.nc"
 
-  # Observations data path
-  observations: "s3://{S3_BUCKET}/staging/temporary/observations/{year}/{month:02d}/{day:02d}/{hour:02d}/gages.dss"
+  # Observations data path (parquet format - will be converted to DSS)
+  observations: "s3://{S3_BUCKET}/staging/temporary/observations/{year}/{month:02d}/{day:02d}/{hour:02d}/gages.parquet"
 
   results:
     lookback_stats: "s3://{S3_BUCKET}/staging/temporary/results/{year}/{month:02d}/{day:02d}/{hour:02d}/stats.parquet"
@@ -34,11 +35,11 @@ local_paths:
 # If no mode specified, uses current UTC time
 modes:
   test:
-    description: "Test mode - uses data from March 11, 2026"
+    description: "Test mode - uses data"
     year: 2026
-    month: 3
-    day: 11
-    hour: 1
+    month: 5
+    day: 22
+    hour: 22
 
   validation1:
     description: "Validation mode 1 - August 21, 2022 - Short duration, high intensity event creating deep water on major arterials"

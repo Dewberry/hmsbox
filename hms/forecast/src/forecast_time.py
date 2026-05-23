@@ -181,22 +181,10 @@ def ensure_control_file_from_map(hms_args: list[str], logger: logging.Logger) ->
             f"[control_file={control_file}] "
             f"[forecast_control_file={forecast_control_path}] "
         )
-        logger.info(
-            # f"Control file generated from `params` [step=control_file] "
-            # f"[control_file={control_file}] "
-            # f"[forecast_control_file={forecast_control_path}] "
-            f"Forecast start={windows['forecast']['start'].isoformat()}], end={windows['forecast']['end'].isoformat()}"
-        )
     elif control_type == "Lookback":
         logger.debug(
             f"Control file generated from `params` [step=control_file] "
             f"[control_file={control_file}] "
             f"[lookback_control_file={lookback_control_path}] "
-        )
-        logger.info(
-            # f"Control file generated from `params` [step=control_file] "
-            # f"[control_file={control_file}] "
-            # f"[lookback_control_file={lookback_control_path}] "
-            f"Lookback start={windows['lookback']['start'].isoformat()}], end={windows['lookback']['end'].isoformat()}"
         )
     return 0

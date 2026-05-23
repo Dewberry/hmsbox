@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import logging
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import yaml
 from forecast_logging import setup_json_logging
 from forecast_time import ensure_control_file_from_map
 
@@ -16,6 +19,21 @@ _SCRIPT_DIR = Path(__file__).parent
 
 # Logger will be reconfigured in main() based on --debug flag
 logger = setup_json_logging()
+
+
+def _get_observations_format(observations_dir: str) -> str | None:
+    """
+    Check the format of observations files.
+    Returns 'parquet', 'dss', or None if not found.
+    """
+    parquet_path = Path(observations_dir) / "gages.parquet"
+    dss_path = Path(observations_dir) / "gages.dss"
+
+    if parquet_path.exists():
+        return "parquet"
+    elif dss_path.exists():
+        return "dss"
+    return None
 
 
 def run_cmd(command: list[str], error_msg: str, step: str, json_logs_only: bool) -> int:
@@ -147,6 +165,55 @@ def _run_python(
         logger.debug(f"Results stats parser completed successfully [step={step}]")
 
     return 0
+
+
+def _set_params_from_mode(
+    mode: str | None, config_path: str = "/app/config.yaml"
+) -> None:
+    """Set the params environment variable based on mode or config datetime."""
+    if not mode:
+        return  # No mode specified, params will remain empty
+
+    logger.debug(f"Setting params environment variable from mode: {mode}")
+
+    try:
+        if not os.path.exists(config_path):
+            logger.warning(
+                f"Config file not found: {config_path}, cannot set params from mode"
+            )
+            return
+
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+
+        modes = config.get("modes", {})
+        if mode not in modes:
+            logger.warning(f"Mode '{mode}' not found in config")
+            return
+
+        mode_config = modes[mode]
+        year = mode_config.get("year")
+        month = mode_config.get("month")
+        day = mode_config.get("day")
+        hour = mode_config.get("hour")
+
+        if not all([year, month, day, hour is not None]):
+            logger.warning(f"Incomplete datetime values in config for mode '{mode}'")
+            return
+
+        # Create forecast_start datetime from mode values
+        forecast_start = datetime(year, month, day, hour, 0, 0, tzinfo=timezone.utc)
+
+        # Create params JSON with forecast_start
+        params = {
+            "forecast_start": forecast_start.isoformat(),
+        }
+
+        os.environ["params"] = json.dumps(params)
+        logger.debug(f"Set params environment variable: {json.dumps(params)}")
+
+    except Exception as e:
+        logger.warning(f"Failed to set params from mode: {e}")
 
 
 def _run_download(
@@ -389,6 +456,11 @@ def main() -> int:
         if download_status != 0:
             return download_status
 
+        # Set params environment variable based on mode if specified
+        # This is needed for control file generation with correct datetime values
+        if args.mode:
+            _set_params_from_mode(args.mode)
+
     # Execute workflow
     if is_lookback_forecast:
         # Lookback-Forecast workflow: run lookback, then forecast
@@ -475,6 +547,38 @@ def main() -> int:
             )
             return forecast_python_status
         logger.info("PROCESSING | data conversion python processing completed")
+
+        # Check observations format and convert if needed
+        observations_dir = str(Path(model_dir).parent / "observations")
+        obs_format = _get_observations_format(observations_dir)
+
+        if obs_format == "parquet":
+            logger.info(
+                "PROCESSING | observations are in parquet format, converting to DSS"
+            )
+            obs_parquet_path = Path(observations_dir) / "gages.parquet"
+            obs_dss_path = Path(observations_dir) / "gages.dss"
+            parquet_to_dss_args = [
+                "parquet-to-dss",
+                str(obs_parquet_path),
+                "-o",
+                str(obs_dss_path),
+            ]
+            obs_conversion_status = _run_python(
+                parquet_to_dss_args, json_logs_only, debug_mode
+            )
+            if obs_conversion_status != 0:
+                logger.error(
+                    f"Observations parquet to DSS conversion failed [exit_code={obs_conversion_status}]"
+                )
+                return obs_conversion_status
+            logger.debug("observations parquet to DSS conversion completed")
+        elif obs_format == "dss":
+            logger.debug("observations are already in DSS format, skipping conversion")
+        else:
+            logger.warning(
+                f"observations not found in {observations_dir}, skipping observations conversion"
+            )
 
         # Run Lookback DSS to parquet export
         default_lookback_dss_python_args = [

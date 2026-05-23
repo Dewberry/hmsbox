@@ -38,8 +38,8 @@ modes:
     description: "Test mode - uses data"
     year: 2026
     month: 5
-    day: 22
-    hour: 22
+    day: 23
+    hour: 15
 
   validation1:
     description: "Validation mode 1 - August 21, 2022 - Short duration, high intensity event creating deep water on major arterials"

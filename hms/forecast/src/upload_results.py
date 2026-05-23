@@ -60,10 +60,10 @@ def load_config(config_path: str = "/app/config.yaml") -> Dict:
         }
         # Replace environment variable placeholders
         config = _replace_env_vars(config, env_vars)
-        logger.info(f"Using S3 bucket from runtime environment: {s3_bucket}")
+        logger.debug(f"Using S3 bucket from runtime environment: {s3_bucket}")
     else:
         # Build-time substitution was done, config is ready to use
-        logger.info("Using S3 bucket configured at build time")
+        logger.debug("Using S3 bucket configured at build time")
 
     return config
 

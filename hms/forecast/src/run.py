@@ -36,6 +36,42 @@ def _get_observations_format(observations_dir: str) -> str | None:
     return None
 
 
+def _validate_hms_output(model_dir: str, control_name: str) -> bool:
+    """
+    Validate that HMS simulation generated expected output files.
+    Returns True if output found, False otherwise.
+
+    HMS writes RUN_<name>.results (XML) when spatial results are disabled,
+    and RUN_<name>.h5 (HDF5) when 'Is Save Spatial Results: Yes' is set.
+    Either file is accepted as proof the simulation ran successfully.
+    """
+    results_dir = Path(model_dir) / "results"
+    candidates = [
+        results_dir / f"RUN_{control_name}.results",
+        results_dir / f"RUN_{control_name}.h5",
+    ]
+
+    for results_file in candidates:
+        if results_file.exists():
+            if results_file.stat().st_size == 0:
+                logger.error(
+                    f"HMS simulation validation failed: results file is empty at {results_file}"
+                )
+                return False
+            logger.debug(
+                f"HMS output validation passed: {results_file} (size: {results_file.stat().st_size} bytes)"
+            )
+            return True
+
+    logger.error(
+        f"HMS simulation validation failed: no results file found in {results_dir} "
+        f"(checked: {', '.join(c.name for c in candidates)}). "
+        f"This typically indicates HMS failed to run properly. Check: "
+        f"1) Model file path is correct, 2) Model is readable, 3) Control file exists"
+    )
+    return False
+
+
 def run_cmd(command: list[str], error_msg: str, step: str, json_logs_only: bool) -> int:
     """Run a subprocess command and handle output."""
     try:
@@ -456,10 +492,20 @@ def main() -> int:
         if download_status != 0:
             return download_status
 
-        # Set params environment variable based on mode if specified
-        # This is needed for control file generation with correct datetime values
+        # Set params environment variable for control file generation.
+        # In test/validation modes, derive from config; in operational mode,
+        # use the current UTC hour (matching what download_data.py used for S3 paths).
         if args.mode:
             _set_params_from_mode(args.mode)
+        else:
+            now = datetime.now(timezone.utc)
+            forecast_start = now.replace(minute=0, second=0, microsecond=0)
+            os.environ["params"] = json.dumps(
+                {"forecast_start": forecast_start.isoformat()}
+            )
+            logger.debug(
+                f"Operational mode: set forecast_start to {forecast_start.isoformat()}"
+            )
 
     # Execute workflow
     if is_lookback_forecast:
@@ -513,6 +559,13 @@ def main() -> int:
             return lookback_hms_status
         logger.debug("completed: lookback simulation")
 
+        # Validate that HMS generated output
+        if not _validate_hms_output(model_dir, args.lookback_control):
+            logger.error(
+                f"Lookback simulation validation failed: expected output not generated [exit_code=1]"
+            )
+            return 1
+
         # Run Python processing after Lookback
         logger.info("PROCESSING | export: stats from lookback")
         lookback_python_status = _run_python(
@@ -535,6 +588,13 @@ def main() -> int:
             )
             return forecast_hms_status
         logger.debug("completed: forecast simulation")
+
+        # Validate that HMS generated output
+        if not _validate_hms_output(model_dir, args.forecast_control):
+            logger.error(
+                f"Forecast simulation validation failed: expected output not generated [exit_code=1]"
+            )
+            return 1
 
         # Run Python processing after Forecast
         logger.info("PROCESSING | export: results from forecast")
@@ -629,4 +689,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+        if exit_code != 0:
+            logger.error(
+                f"HMS BOX    | Forecast container exited with error code {exit_code}"
+            )
+        raise SystemExit(exit_code)
+    except SystemExit:
+        raise
+    except Exception as e:
+        logger.error(f"HMS BOX    | Unexpected error: {e}")
+        raise SystemExit(1)

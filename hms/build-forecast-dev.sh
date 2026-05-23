@@ -12,7 +12,7 @@ HMS_S3_BUCKET="${1:-flood-warning}"  # S3 bucket can be passed as an argument, d
 # docker build -t $IMAGE --build-arg HMS_VERSION=$HMS_VERSION ./headless
 
 # Build the image (if not already built)
-# docker build -t $IMAGE ./forecast
+docker build -t $IMAGE ./forecast
 
 # MODEL_VERSION=trinity-v20260509  # This should match the version in config.yaml
 MODEL_VERSION=trinity-v20260522.1
@@ -64,7 +64,6 @@ docker run --rm \
     -v $LOCAL_CONFIG:/app/config.yaml \
     -e HMS_S3_BUCKET="$HMS_S3_BUCKET" \
     $IMAGE \
-    --mode test \
     --no-upload \
     $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME
 

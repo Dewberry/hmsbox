@@ -22,7 +22,7 @@ def parse_time_input(value: str) -> datetime:
 def infer_windows(lookback_start: datetime) -> dict[str, dict[str, datetime]]:
     lookback_end = lookback_start + timedelta(hours=335)
     forecast_start = lookback_end + timedelta(hours=1)
-    forecast_end = forecast_start + timedelta(hours=17)
+    forecast_end = forecast_start + timedelta(hours=16)
     return {
         "lookback": {"start": lookback_start, "end": lookback_end},
         "forecast": {"start": forecast_start, "end": forecast_end},
@@ -34,7 +34,7 @@ def infer_windows_from_forecast_start(
 ) -> dict[str, dict[str, datetime]]:
     lookback_end = forecast_start - timedelta(hours=1)
     lookback_start = lookback_end - timedelta(hours=335)
-    forecast_end = forecast_start + timedelta(hours=17)
+    forecast_end = forecast_start + timedelta(hours=16)
     return {
         "lookback": {"start": lookback_start, "end": lookback_end},
         "forecast": {"start": forecast_start, "end": forecast_end},

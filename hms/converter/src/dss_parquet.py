@@ -227,12 +227,17 @@ def parquet_to_dss(
                     path_parts["E"] = interval
 
                 # Get F part from data or use override
-                # If no F part is provided and no qualifier in data, use E part (interval) as F part
-                f_part = path_f_part or path_parts.get("F", path_parts.get("E", ""))
+                # Determine F part based on provider
+                a_part = path_parts.get("A", "")
+                provider = a_part.upper() if a_part else ""
+
+                # If no F part is provided, set to "gage" for USGS provider, blank otherwise
+                f_part = path_f_part or path_parts.get("F", "")
+                if not f_part:
+                    f_part = "GAGE" if provider == "USGS" else ""
 
                 # Build full DSS path: /A/B/C/D/E/F/ preserving structure
                 # Ensure all 6 parts are present as positional elements
-                a_part = path_parts.get("A", "")
                 b_part = path_parts.get("B", "")
                 c_part = path_parts.get("C", "")
                 d_part = path_parts.get("D", "")
@@ -247,6 +252,20 @@ def parquet_to_dss(
                     f"Writing DSS path: {dss_path} with {len(group_data)} records"
                 )
 
+                # Validate C part and determine units
+                c_part = path_parts.get("C", "").upper()
+                if c_part == "FLOW":
+                    units = "CFS"
+                elif c_part == "ELEVATION":
+                    units = "FT"
+                else:
+                    logger.error(
+                        f"Invalid C part '{c_part}'. Expected 'FLOW' (CFS) or 'ELEVATION' (FT)"
+                    )
+                    raise ValueError(
+                        f"Invalid C part '{c_part}'. C part must be either 'FLOW' or 'ELEVATION', got '{c_part}'"
+                    )
+
                 # Write to DSS using RegularTimeSeries
                 try:
                     # Create a RegularTimeSeries object
@@ -256,7 +275,7 @@ def parquet_to_dss(
                         times=times,  # Pass datetime array
                         start_date=times[0],
                         interval=interval,
-                        units="CFS",
+                        units=units,
                         data_type="INST-VAL",
                         path=dss_path,
                     )

@@ -3,14 +3,22 @@
 
 set -e  # Exit on error
 
+
 IMAGE=hmsbox-forecast:4.14-beta.1
 HMS_S3_BUCKET="${1:-flood-warning}"  # S3 bucket can be passed as an argument, defaults to 'flood-warning'
+
+# Build the headless image (if not already built)
+# IMAGE=hmsbox-headless:$HMS_VERSION
+# docker build -t $IMAGE --build-arg HMS_VERSION=$HMS_VERSION ./headless
 
 # Build the image (if not already built)
 # docker build -t $IMAGE ./forecast
 
+# MODEL_VERSION=trinity-v20260509  # This should match the version in config.yaml
+MODEL_VERSION=trinity-v20260522.1
+
 # HOST_MODEL_DIR=./model
-HOST_MODEL_DIR=/home/ubuntu/pilot/hmsbox/model/
+HOST_MODEL_DIR=/home/ubuntu/pilot/hmsbox/$MODEL_VERSION/
 CONTAINER_MODEL_DIR=/mnt/model
 LOCAL_CONFIG=./forecast/config.yaml
 

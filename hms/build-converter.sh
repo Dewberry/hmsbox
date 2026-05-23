@@ -2,10 +2,10 @@
 
 IMAGE=hmsbox-converter:latest
 
-# docker build -t $IMAGE ./converter #--no-cache
+docker build -t $IMAGE ./converter #--no-cache
 
 # HOST_DATA_DIR=./model/observations
-HOST_DATA_DIR=/home/ubuntu/pilot/hmsbox/data/test
+HOST_DATA_DIR=/home/ubuntu/pilot/hmsbox/data/converter-test-data
 DSS_DATA_INPUT_FILE=gages.dss
 PARQUET_DATA_INPUT_FILE=gages.parquet
 

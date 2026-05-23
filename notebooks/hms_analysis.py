@@ -118,6 +118,12 @@ def _tile2deg(x, y, zoom):
 
 def fetch_osm_basemap(lon_min, lon_max, lat_min, lat_max, zoom=8):
     """Fetch OpenStreetMap tiles and stitch into a basemap image array."""
+    enable_basemap = os.getenv("ENABLE_OSM_BASEMAP", "1").strip().lower()
+    if enable_basemap in {"0", "false", "no", "off"}:
+        raise RuntimeError("OSM basemap disabled by ENABLE_OSM_BASEMAP")
+
+    request_timeout = float(os.getenv("OSM_TILE_TIMEOUT_SEC", "2.5"))
+
     # NW corner -> smallest x and y tile
     x_min, y_min = _deg2tile(lat_max, lon_min, zoom)
     # SE corner -> largest x and y tile
@@ -131,7 +137,7 @@ def fetch_osm_basemap(lon_min, lon_max, lat_min, lat_max, zoom=8):
         for ty in range(y_min, y_max + 1):
             url = f"https://tile.openstreetmap.org/{zoom}/{tx}/{ty}.png"
             try:
-                r = requests.get(url, headers=headers, timeout=10)
+                r = requests.get(url, headers=headers, timeout=request_timeout)
                 tile_img = PILImage.open(BytesIO(r.content)).convert("RGB")
                 stitched.paste(
                     tile_img, ((tx - x_min) * tile_size, (ty - y_min) * tile_size)

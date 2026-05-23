@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
 
 
 def run(cmd: list[str], desc: str) -> None:
@@ -35,7 +36,14 @@ def run(cmd: list[str], desc: str) -> None:
 
 
 def s3_upload(local_path: Path, bucket: str, key: str) -> None:
-    s3 = boto3.client("s3")
+    s3 = boto3.client(
+        "s3",
+        config=Config(
+            connect_timeout=5,
+            read_timeout=30,
+            retries={"max_attempts": 2, "mode": "standard"},
+        ),
+    )
     s3.upload_file(str(local_path), bucket, key)
     print(f"  ✓ {local_path.name} → s3://{bucket}/{key}")
 
@@ -51,9 +59,7 @@ def main() -> None:
     parser.add_argument(
         "--base-name", default=os.getenv("BASE_NAME", "HMS_Analysis_Report")
     )
-    parser.add_argument(
-        "--s3-bucket", default=os.getenv("HMS_S3_BUCKET", "flood-warning")
-    )
+    parser.add_argument("--s3-bucket", default=os.getenv("HMS_S3_BUCKET"))
     parser.add_argument(
         "--s3-prefix",
         default=os.getenv("S3_RESULTS_PREFIX", "staging/temporary/results"),
@@ -87,7 +93,7 @@ def main() -> None:
             "--to",
             "notebook",
             "--execute",
-            "--ExecutePreprocessor.timeout=3600",
+            "--ExecutePreprocessor.timeout=180",
             f"--output={executed_ipynb}",
             str(notebook_path),
         ],

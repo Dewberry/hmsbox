@@ -17,6 +17,16 @@ from botocore.exceptions import ClientError
 from forecast_logging import setup_json_logging
 from vault_utils import download_s3_file, unpack_modelvault
 
+# Import parquet_to_dss converter
+try:
+    from dss_parquet import parquet_to_dss
+except ModuleNotFoundError:
+    # Fallback if running outside containerized environment
+    import sys
+
+    sys.path.insert(0, "/app/src")
+    from dss_parquet import parquet_to_dss
+
 
 def _replace_env_vars(obj, env_vars: Dict[str, str]):
     """Recursively replace environment variable placeholders in config."""
@@ -227,14 +237,56 @@ def download_all_data(
             return False
         logger.debug(f"Successfully downloaded {filename}")
 
-    # Download observations
-    obs_filename = "gages.dss"
-    obs_output_path = os.path.join(observations_dir, obs_filename)
+    # Download observations and convert to DSS if needed
+    obs_parquet_filename = "gages.parquet"
+    obs_dss_filename = "gages.dss"
+    obs_parquet_path = os.path.join(observations_dir, obs_parquet_filename)
+    obs_dss_path = os.path.join(observations_dir, obs_dss_filename)
+
+    # Check if DSS observations already exist locally
+    if os.path.exists(obs_dss_path):
+        logger.info(
+            f"DATA       | observations DSS file already exists at {obs_dss_path}, skipping download and conversion"
+        )
+        logger.debug("All data downloaded successfully")
+        return True
+
     logger.info(f"DATA       | observations: {s3_paths['observations']}")
-    if not download_s3_file(s3_paths["observations"], obs_output_path, logger):
-        logger.error("Failed to download observations file")
-        return False
-    logger.debug("Successfully downloaded observations")
+
+    # Detect if S3 observations are already in DSS format or parquet
+    obs_s3_path = s3_paths["observations"]
+    if obs_s3_path.endswith(".dss"):
+        # S3 observations are already DSS, download directly as DSS
+        if not download_s3_file(obs_s3_path, obs_dss_path, logger):
+            logger.error("Failed to download observations DSS file")
+            return False
+        logger.debug("Successfully downloaded observations DSS file")
+    else:
+        # S3 observations are parquet, download and convert to DSS
+        if not download_s3_file(obs_s3_path, obs_parquet_path, logger):
+            logger.error("Failed to download observations parquet file")
+            return False
+        logger.debug("Successfully downloaded observations parquet file")
+
+        # Convert parquet to DSS format
+        logger.info("CONVERTER  | Converting observations from parquet to DSS format")
+        try:
+            result = parquet_to_dss(
+                parquet_path=obs_parquet_path,
+                output_dss_path=obs_dss_path,
+                suppress_dss_output=False,
+            )
+            if "error" in result:
+                logger.error(f"Failed to convert parquet to DSS: {result['error']}")
+                return False
+            logger.info(
+                f"CONVERTER  | Successfully converted {result.get('converted', 0)} timeseries to DSS"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to convert observations parquet to DSS: {e}", exc_info=True
+            )
+            return False
 
     logger.debug("All data downloaded successfully")
     return True

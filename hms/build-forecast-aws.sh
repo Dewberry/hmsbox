@@ -18,9 +18,9 @@ set -e
 
 HMS_VERSION="${1:-4.14-beta.1}"
 S3_BUCKET="${2:-flood-warning}"
-ACCOUNT_ID="141287515476"
+ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
 LAMBDA_VERSION=v0.1.14
-ECS_VERSION=v0.1.3
+ECS_VERSION=v0.1.4
 
 
 echo "Building HMS Forecast Lambda container with HMS version ${HMS_VERSION}..."

@@ -23,6 +23,7 @@ s3_paths:
   results:
     lookback_stats: "s3://{S3_BUCKET}/staging/temporary/results/{year}/{month:02d}/{day:02d}/{hour:02d}/stats.parquet"
     forecast_output: "s3://{S3_BUCKET}/staging/temporary/results/{year}/{month:02d}/{day:02d}/{hour:02d}/forecast.parquet"
+    lookback_output: "s3://{S3_BUCKET}/staging/temporary/results/{year}/{month:02d}/{day:02d}/{hour:02d}/lookback.parquet"
 
 # Local paths where data will be downloaded
 local_paths:

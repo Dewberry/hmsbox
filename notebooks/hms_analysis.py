@@ -18,6 +18,7 @@ from pathlib import Path
 import folium
 import geopandas as gpd
 import matplotlib.animation as animation
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -26,6 +27,53 @@ import xarray as xr
 from PIL import Image as PILImage
 
 warnings.filterwarnings("ignore")
+
+# NWS standard precipitation colormap (inches)
+# Starts at 0.01 in — values below that are left transparent (no fill)
+# Upper bounds extended to 30 in for multi-day cumulative totals
+_NWS_PRECIP_BOUNDS = [
+    0.01,
+    0.1,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.5,
+    2.0,
+    2.5,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    8.0,
+    10.0,
+    15.0,
+    20.0,
+    30.0,
+]
+_NWS_PRECIP_COLORS = [
+    "#04e9e7",
+    "#019ff4",
+    "#0300f4",  # cyan → blue
+    "#02fd02",
+    "#01c501",
+    "#008e00",  # light → dark green
+    "#fdf802",
+    "#e5bc00",
+    "#fd9500",  # yellow → orange
+    "#fd0000",
+    "#d40000",
+    "#bc0000",  # light → dark red
+    "#f800fd",
+    "#9854c6",  # magenta, purple
+    "#680068",
+    "#4b0082",
+    "#2d004b",  # dark purple tiers (10–30 in)
+]
+_NWS_CMAP = mcolors.ListedColormap(_NWS_PRECIP_COLORS)
+_NWS_CMAP.set_under("none")  # transparent for values below the lowest bound
+_NWS_CMAP.set_bad("none")  # transparent for NaN / masked values
+_NWS_NORM = mcolors.BoundaryNorm(_NWS_PRECIP_BOUNDS, _NWS_CMAP.N)
 
 
 # Configure matplotlib for non-interactive backend
@@ -39,6 +87,7 @@ OUTPUT_PATH = WORK_PATH
 
 FORCING_PATH = f"{DATA_PATH}/forcing"
 RESULTS_PATH = f"{MODEL_PATH}/results"
+OBS_PATH = os.getenv("OBS_PATH", f"{DATA_PATH}/observations")
 GEOJSON_PATH = f"{MODEL_PATH}/basinStates/Junction.geojson"
 
 
@@ -95,92 +144,123 @@ def fetch_osm_basemap(lon_min, lon_max, lat_min, lat_max, zoom=8):
     return np.array(stitched), extent
 
 
-def plot_cumulative_forcing(mrms_file):
-    """Plot cumulative MRMS QPE forcing with OSM basemap."""
-    # print("Loading MRMS data...")
-    mrms_data = xr.open_dataset(mrms_file)
-
-    precip_var = get_var_by_pattern(mrms_data, ["precip", "qpe", "qpe_in", "rate"])
-
-    if precip_var is None:
-        # print("Warning: Could not find precipitation variable in MRMS data")
-        return None
-
-    # print(f"  Using variable: {precip_var}")
-
-    # Get precipitation data - (time, latitude, longitude)
-    precip = mrms_data[precip_var].values
-    times = mrms_data["time"].values
-    lats = mrms_data["latitude"].values
-    lons = mrms_data["longitude"].values
-
-    # Calculate cumulative sum along time dimension
-    cumulative_precip = np.cumsum(precip, axis=0)
-    final_cumulative = cumulative_precip[-1]  # Last time step
-
+def _plot_cumulative_panel(ax, precip, lats, lons, times, title):
+    """Render a single cumulative QPE panel onto ax (imshow, same style as HRRR)."""
+    cumulative = np.cumsum(precip, axis=0)[-1]
     lon_min, lon_max = float(lons.min()), float(lons.max())
     lat_min, lat_max = float(lats.min()), float(lats.max())
 
-    fig, ax = plt.subplots(figsize=(14, 10))
-
-    # OSM basemap
-    # print("  Fetching OSM basemap...")
     try:
         basemap_img, basemap_extent = fetch_osm_basemap(
             lon_min, lon_max, lat_min, lat_max, zoom=8
         )
-        ax.imshow(basemap_img, extent=basemap_extent, aspect="auto", zorder=0)
-    except Exception as e:
-        # print(f"  Warning: Could not fetch basemap: {e}")
+        # Desaturate basemap so NWS colors pop
+        gray = np.mean(basemap_img, axis=2, keepdims=True)
+        faded = (0.4 * basemap_img + 0.6 * gray).astype(np.uint8)
+        ax.imshow(faded, extent=basemap_extent, aspect="auto", zorder=0)
+    except Exception:
         pass
 
-    # Plot cumulative precipitation on top
-    lon_grid, lat_grid = np.meshgrid(lons, lats)
-    contourf = ax.contourf(
-        lon_grid,
-        lat_grid,
-        final_cumulative,
-        levels=20,
-        cmap="Blues",
-        alpha=0.65,
+    # Flip so north is up if lats are ascending (south→north)
+    plot_data = cumulative[::-1] if lats[0] < lats[-1] else cumulative
+
+    im = ax.imshow(
+        plot_data,
+        extent=[lon_min, lon_max, lat_min, lat_max],
+        aspect="auto",
+        cmap=_NWS_CMAP,
+        norm=_NWS_NORM,
+        alpha=0.25,
         zorder=1,
     )
-    contour = ax.contour(
-        lon_grid,
-        lat_grid,
-        final_cumulative,
-        levels=10,
-        colors="navy",
-        alpha=0.4,
-        linewidths=0.5,
-        zorder=2,
-    )
-    ax.clabel(contour, inline=True, fontsize=8)
-
     ax.set_xlim(lon_min, lon_max)
     ax.set_ylim(lat_min, lat_max)
     ax.grid(True, alpha=0.3, linestyle="--", zorder=3)
-    ax.set_xlabel("Longitude", fontsize=12)
-    ax.set_ylabel("Latitude", fontsize=12)
+    ax.set_xlabel("Longitude", fontsize=10)
+    ax.set_ylabel("Latitude", fontsize=10)
+    ax.set_title(title, fontsize=12, fontweight="bold")
+    return im
 
-    plt.colorbar(contourf, ax=ax, label="Cumulative Precipitation (inches)")
 
+def plot_cumulative_forcing(mrms_file):
+    """Plot cumulative MRMS QPE: two panels — full lookback and last 72 hours."""
+    mrms_data = xr.open_dataset(mrms_file)
+
+    precip_var = get_var_by_pattern(mrms_data, ["precip", "qpe", "qpe_in", "rate"])
+    if precip_var is None:
+        return None
+
+    precip = mrms_data[precip_var].values  # (time, lat, lon)
+    # Data is always in mm — convert to inches unconditionally
+    precip = precip / 25.4
+    times = mrms_data["time"].values
+    lats = mrms_data["latitude"].values
+    lons = mrms_data["longitude"].values
+
+    # Last 72 hourly timesteps (or fewer if data is shorter)
+    n_72h = min(72, len(times))
+    precip_72h = precip[-n_72h:]
+    times_72h = times[-n_72h:]
+
+    def _fmt(t):
+        try:
+            return pd.Timestamp(t).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return str(t)
+
+    # Compute actual lookback duration from the timestamp range
     try:
-        start_time = pd.Timestamp(times[0]).strftime("%Y-%m-%d %H:%M")
-        end_time = pd.Timestamp(times[-1]).strftime("%Y-%m-%d %H:%M")
-        title = f"Cumulative MRMS QPE\n{start_time} to {end_time}"
+        t0 = pd.Timestamp(times[0])
+        t1 = pd.Timestamp(times[-1])
+        total_days = (t1 - t0).total_seconds() / 86400
+        if total_days >= 1:
+            duration_str = f"{total_days:.0f} days"
+        else:
+            duration_str = f"{total_days * 24:.0f} hours"
     except Exception:
-        title = "Cumulative MRMS QPE"
+        duration_str = f"{len(times)} steps"
 
-    ax.set_title(title, fontsize=14, fontweight="bold")
+    fig, axes = plt.subplots(1, 2, figsize=(22, 9))
+
+    im0 = _plot_cumulative_panel(
+        axes[0],
+        precip,
+        lats,
+        lons,
+        times,
+        f"Full Lookback ({duration_str})\n{_fmt(times[0])} → {_fmt(times[-1])}",
+    )
+    _plot_cumulative_panel(
+        axes[1],
+        precip_72h,
+        lats,
+        lons,
+        times_72h,
+        f"Last 72 Hours\n{_fmt(times_72h[0])} → {_fmt(times_72h[-1])}",
+    )
+
+    fig.colorbar(
+        im0,
+        ax=axes.tolist(),
+        orientation="horizontal",
+        location="bottom",
+        label="Cumulative Precipitation (in)",
+        ticks=_NWS_PRECIP_BOUNDS,
+        boundaries=_NWS_PRECIP_BOUNDS,
+        pad=0.08,
+        aspect=50,
+    )
 
     plt.tight_layout()
+    plt.subplots_adjust(bottom=0.30)
     output_file = f"{OUTPUT_PATH}/01_cumulative_forcing.png"
     plt.savefig(output_file, dpi=100, bbox_inches="tight")
     plt.close()
 
-    # print(f"Cumulative forcing saved: {output_file}")
-    return (float(final_cumulative.min()), float(final_cumulative.max()))
+    return (
+        float(np.cumsum(precip, axis=0)[-1].min()),
+        float(np.cumsum(precip, axis=0)[-1].max()),
+    )
 
 
 def create_forecast_animation(hrrr_file):
@@ -200,11 +280,82 @@ def create_forecast_animation(hrrr_file):
 
     # Get data - (init_time, step, y, x)
     hrrr_precip = hrrr_data[precip_var].values
+    # Data is always in mm — convert to inches unconditionally
+    hrrr_precip = hrrr_precip / 25.4
 
-    if "valid_time" in hrrr_data.coords:
-        times_hrrr = hrrr_data["valid_time"].values
-    else:
-        times_hrrr = [f"Step {i}" for i in range(hrrr_precip.shape[1])]
+    # Resolve per-step valid times from whatever coords are available
+    def _extract_times(ds, n):
+        def _as_datetime_list(values, count):
+            arr = np.asarray(values).reshape(-1)
+            if arr.size == 0:
+                return None
+            parsed = pd.to_datetime(arr, errors="coerce")
+            if hasattr(parsed, "isna") and not parsed.isna().all():
+                out = [t for t in parsed.to_pydatetime().tolist() if pd.notna(t)]
+                return out[:count] if out else None
+            return None
+
+        def _step_to_timedelta(step_val, units_hint):
+            arr = np.asarray(step_val)
+            if np.issubdtype(arr.dtype, np.timedelta64):
+                return pd.to_timedelta(step_val)
+
+            if np.issubdtype(arr.dtype, np.number):
+                sval = float(step_val)
+                if "min" in units_hint:
+                    return pd.to_timedelta(sval, unit="m")
+                if "sec" in units_hint:
+                    return pd.to_timedelta(sval, unit="s")
+                if "day" in units_hint:
+                    return pd.to_timedelta(sval, unit="D")
+                return pd.to_timedelta(sval, unit="h")
+
+            td = pd.to_timedelta(step_val, errors="coerce")
+            return None if pd.isna(td) else td
+
+        # Prefer explicit valid_time when available (often 2D: init_time × step)
+        if "valid_time" in ds:
+            vt = _as_datetime_list(ds["valid_time"].values, n)
+            if vt and len(vt) >= n:
+                return vt[:n]
+
+        # Some files expose direct per-step time coordinate
+        for dim in ("time",):
+            if dim in ds.coords:
+                dt = _as_datetime_list(ds[dim].values, n)
+                if dt and len(dt) >= n:
+                    return dt[:n]
+
+        # Build valid times from init/reference time + step offsets
+        init = None
+        for dim in ("init_time", "forecast_reference_time", "time"):
+            if dim in ds.coords:
+                cand = pd.to_datetime(
+                    np.asarray(ds[dim].values).reshape(-1)[0], errors="coerce"
+                )
+                if pd.notna(cand):
+                    init = pd.Timestamp(cand)
+                    break
+
+        if init is not None and "step" in ds.coords:
+            step_vals = np.asarray(ds["step"].values).reshape(-1)[:n]
+            units_hint = str(ds["step"].attrs.get("units", "")).lower()
+            built = []
+            for s in step_vals:
+                td = _step_to_timedelta(s, units_hint)
+                if td is None:
+                    built = []
+                    break
+                built.append(init + td)
+            if len(built) == len(step_vals) and len(built) >= n:
+                return built[:n]
+
+        return [f"Step {i + 1}" for i in range(n)]
+
+    times_hrrr = _extract_times(
+        hrrr_data,
+        hrrr_precip.shape[1] if hrrr_precip.ndim == 4 else hrrr_precip.shape[0],
+    )
 
     n_steps = hrrr_precip.shape[1] if hrrr_precip.ndim == 4 else hrrr_precip.shape[0]
 
@@ -234,21 +385,28 @@ def create_forecast_animation(hrrr_file):
             basemap_img, basemap_extent = fetch_osm_basemap(
                 lon_min, lon_max, lat_min, lat_max, zoom=8
             )
-            ax.imshow(basemap_img, extent=basemap_extent, aspect="auto", zorder=0)
+            gray = np.mean(basemap_img, axis=2, keepdims=True)
+            faded = (0.4 * basemap_img + 0.6 * gray).astype(np.uint8)
+            ax.imshow(faded, extent=basemap_extent, aspect="auto", zorder=0)
         except Exception as e:
             # print(f"  Warning: Could not fetch basemap: {e}")
             pass
-        pass
 
     # Draw initial frame
     data0 = hrrr_precip[0, 0] if hrrr_precip.ndim == 4 else hrrr_precip[0]
-    kwargs = dict(cmap="YlGnBu", vmin=vmin, vmax=vmax, alpha=0.7, zorder=1)
+    kwargs = dict(cmap=_NWS_CMAP, norm=_NWS_NORM, alpha=0.25, zorder=1)
     if data_extent:
         kwargs["extent"] = data_extent
         kwargs["aspect"] = "auto"
     im = ax.imshow(data0, **kwargs)
 
-    cbar = fig.colorbar(im, ax=ax, label="Precip (inches)")
+    cbar = fig.colorbar(
+        im,
+        ax=ax,
+        label="Precip (in)",
+        ticks=_NWS_PRECIP_BOUNDS,
+        boundaries=_NWS_PRECIP_BOUNDS,
+    )
 
     if data_extent:
         ax.set_xlim(lon_min, lon_max)
@@ -259,7 +417,7 @@ def create_forecast_animation(hrrr_file):
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
 
-    title = ax.set_title("")
+    ax.set_title("HRRR QPF", fontsize=12)
 
     def update_frame(frame):
         data = hrrr_precip[0, frame] if hrrr_precip.ndim == 4 else hrrr_precip[frame]
@@ -268,11 +426,11 @@ def create_forecast_animation(hrrr_file):
             time_str = pd.Timestamp(times_hrrr[frame]).strftime("%Y-%m-%d %H:%M UTC")
         except Exception:
             time_str = str(times_hrrr[frame])
-        title.set_text(f"HRRR QPF - {time_str}")
-        return [im, title]
+        ax.set_title(f"HRRR QPF  —  {time_str}", fontsize=12)
+        return [im]
 
     anim = animation.FuncAnimation(
-        fig, update_frame, frames=range(n_steps), interval=500, blit=True, repeat=True
+        fig, update_frame, frames=range(n_steps), interval=500, blit=False, repeat=True
     )
 
     anim_file = f"{OUTPUT_PATH}/hrrr_forecast_animation.gif"
@@ -289,124 +447,240 @@ def create_forecast_animation(hrrr_file):
 
 
 def plot_hydrographs():
-    """Plot hydrographs from long-format parquet files with observed data."""
-    # print("Loading hydrograph data...")
+    """Plot hydrographs for all sites. Sites with both flow and stage get side-by-side panels."""
     lookback_df = pd.read_parquet(f"{RESULTS_PATH}/lookback.parquet")
     forecast_df = pd.read_parquet(f"{RESULTS_PATH}/forecast.parquet")
 
-    # print(f"  Lookback: {len(lookback_df)} records")
-    # print(f"  Forecast: {len(forecast_df)} records")
-
-    # Convert timestamp to datetime
     lookback_df["timestamp"] = pd.to_datetime(lookback_df["timestamp"])
     forecast_df["timestamp"] = pd.to_datetime(forecast_df["timestamp"])
 
-    # Only keep sites that have FLOW-OBSERVED data in lookback
-    observed_sites = lookback_df[lookback_df["variable"] == "FLOW-OBSERVED"][
-        "site_id"
-    ].unique()
-    forecast_sites = forecast_df["site_id"].unique()
-    common_sites = sorted(list(set(observed_sites) & set(forecast_sites)))
+    # Coerce to float first so NaN replacement works regardless of stored dtype,
+    # then mask any large-negative HMS sentinel (-999, -9999, -901, etc.)
+    lookback_df["value"] = pd.to_numeric(lookback_df["value"], errors="coerce")
+    forecast_df["value"] = pd.to_numeric(forecast_df["value"], errors="coerce")
+    lookback_df["value"] = lookback_df["value"].where(
+        lookback_df["value"] > -100, np.nan
+    )
+    forecast_df["value"] = forecast_df["value"].where(
+        forecast_df["value"] > -100, np.nan
+    )
 
-    # print(f"  Sites with FLOW-OBSERVED: {len(observed_sites)}")
-    # print(f"  Sites with observed + forecast: {len(common_sites)}")
+    # Load gage metadata to determine variable type (Flow vs Stage/Elevation)
+    gage_meta = {}  # site_id -> "Flow" | "Stage" | unknown
+    gage_file = Path(OBS_PATH) / "gages.parquet"
+    if gage_file.exists():
+        try:
+            gages_df = pd.read_parquet(gage_file)
+            # Expect columns like: site_id, variable / gage_type / GageType / type
+            type_col = next(
+                (
+                    c
+                    for c in gages_df.columns
+                    if c.lower() in ("gagetype", "gage_type", "variable", "type")
+                ),
+                None,
+            )
+            id_col = next(
+                (
+                    c
+                    for c in gages_df.columns
+                    if c.lower() in ("site_id", "siteid", "gage_id", "id", "name")
+                ),
+                None,
+            )
+            if type_col and id_col:
+                for _, row in gages_df.drop_duplicates(subset=[id_col]).iterrows():
+                    gage_meta[str(row[id_col])] = str(row[type_col])
+        except Exception:
+            pass
 
-    if len(common_sites) == 0:
-        # print("  Warning: No sites with observed data found")
+    def _gage_type(site):
+        raw = gage_meta.get(site, "")
+        if "stage" in raw.lower() or "elevation" in raw.lower():
+            return "stage"
+        return "flow"
+
+    # Collect all sites that appear in lookback as observed (any variable containing OBSERVED)
+    obs_vars = lookback_df[lookback_df["variable"].str.contains("OBSERVED", na=False)]
+    observed_sites = sorted(obs_vars["site_id"].unique().tolist())
+    forecast_sites = set(forecast_df["site_id"].unique())
+
+    if len(observed_sites) == 0:
         return 0
 
-    # Plot hydrographs for selected sites
-    n_sites = min(6, len(common_sites))
-    selected_sites = common_sites[:n_sites]
+    def _plot_site(
+        ax, lookback_site, forecast_site_df, obs_var, model_vars, ylabel, is_stage
+    ):
+        """Render one hydrograph panel."""
+        obs_data = lookback_site[lookback_site["variable"] == obs_var]
+        if len(obs_data) > 0:
+            ax.plot(
+                obs_data["timestamp"],
+                obs_data["value"],
+                color="black",
+                linewidth=2.0,
+                label="Observed",
+                zorder=3,
+            )
 
-    fig, axes = plt.subplots(n_sites, 1, figsize=(14, 3 * n_sites))
-    if n_sites == 1:
-        axes = [axes]
+        # Modeled lookback
+        for var in model_vars:
+            mod = lookback_site[lookback_site["variable"] == var]
+            if len(mod) > 0:
+                ax.plot(
+                    mod["timestamp"],
+                    mod["value"],
+                    color="steelblue",
+                    linewidth=1.8,
+                    linestyle="--",
+                    label="Lookback Modeled",
+                    zorder=2,
+                )
+                break
+
+        # Forecast
+        if forecast_site_df is not None:
+            for var in model_vars:
+                fc = forecast_site_df[forecast_site_df["variable"] == var]
+                if len(fc) > 0:
+                    ax.plot(
+                        fc["timestamp"],
+                        fc["value"],
+                        color="darkorange",
+                        linewidth=1.8,
+                        linestyle="-.",
+                        label="Forecast",
+                        zorder=2,
+                    )
+                    break
+
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.legend(loc="upper left", fontsize=8, framealpha=0.7)
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(axis="x", labelsize=8, rotation=30)
+
+        # For stage/elevation panels, fix y-axis to observed min/max ± 10 ft
+        # so scale differences don't distort visual interpretation
+        if is_stage and len(obs_data) > 0:
+            valid = obs_data["value"].dropna()
+            if len(valid) > 0:
+                ax.set_ylim(valid.min() - 10, valid.max() + 10)
+
+    # Build per-site row specs: (has_flow, has_stage)
+    site_specs = []
+    for site in observed_sites:
+        lb = lookback_df[lookback_df["site_id"] == site]
+        vars_present = set(lb["variable"].unique())
+        has_flow = bool(vars_present & {"FLOW-OBSERVED"})
+        has_stage = bool(vars_present & {"STAGE-OBSERVED", "ELEVATION-OBSERVED"})
+        # If gage file says it's a stage gage but only FLOW-OBSERVED exists, treat all as stage label
+        if not (has_flow or has_stage):
+            has_flow = True  # fallback
+        site_specs.append((site, has_flow, has_stage))
+
+    n_sites = len(site_specs)
+    # Number of subplot columns per row: 2 if both, else 1
+    # Use a single-column layout but double up when both present
+    max_cols = 2
+    rows = []
+    for site, has_flow, has_stage in site_specs:
+        ncols = 2 if (has_flow and has_stage) else 1
+        rows.append((site, has_flow, has_stage, ncols))
+
+    fig_height = max(4, 3 * n_sites)
+    fig, axes_grid = plt.subplots(
+        n_sites,
+        max_cols,
+        figsize=(16, fig_height),
+        squeeze=False,
+    )
 
     fig.suptitle(
         "Hydrographs: Observed, Lookback Modeled, and Forecast",
         fontsize=14,
         fontweight="bold",
+        y=1.002,
     )
 
-    for ax, site in zip(axes, selected_sites):
-        # Get lookback data for this site
-        lookback_site = lookback_df[lookback_df["site_id"] == site].sort_values(
-            "timestamp"
+    for row_idx, (site, has_flow, has_stage, ncols) in enumerate(rows):
+        lb = lookback_df[lookback_df["site_id"] == site].sort_values("timestamp")
+        fc = (
+            forecast_df[forecast_df["site_id"] == site].sort_values("timestamp")
+            if site in forecast_sites
+            else None
         )
 
-        # Get forecast data for this site
-        forecast_site = forecast_df[forecast_df["site_id"] == site].sort_values(
-            "timestamp"
-        )
+        gtype = _gage_type(site)
 
-        # Extract observed flow from lookback — exact match only
-        obs_data = lookback_site[lookback_site["variable"] == "FLOW-OBSERVED"]
-        if len(obs_data) > 0:
-            ax.plot(
-                obs_data["timestamp"],
-                obs_data["value"],
-                marker="o",
-                linestyle="-",
-                linewidth=2.5,
-                markersize=3,
-                label="Observed",
-                color="black",
-                alpha=0.8,
-                zorder=3,
+        col = 0
+        if has_flow:
+            ax = axes_grid[row_idx, col]
+            flow_ylabel = "Flow (cfs)"
+            _plot_site(
+                ax,
+                lb,
+                fc,
+                "FLOW-OBSERVED",
+                ["FLOW-COMBINE", "FLOW"],
+                flow_ylabel,
+                is_stage=False,
             )
+            ax.set_title(f"{site}  —  Flow", fontsize=10, fontweight="bold")
+            col += 1
 
-        # Extract modeled lookback flow — prefer FLOW-COMBINE, fall back to FLOW
-        for var in ["FLOW-COMBINE", "FLOW"]:
-            modeled_data = lookback_site[lookback_site["variable"] == var]
-            if len(modeled_data) > 0:
-                break
-        if len(modeled_data) > 0:
-            ax.plot(
-                modeled_data["timestamp"],
-                modeled_data["value"],
-                marker="s",
-                linestyle="--",
-                linewidth=2,
-                markersize=2.5,
-                label="Lookback Modeled",
-                color="blue",
-                alpha=0.7,
-                zorder=2,
+        if has_stage:
+            ax = axes_grid[row_idx, col]
+            stage_var = (
+                "STAGE-OBSERVED"
+                if "STAGE-OBSERVED" in lb["variable"].values
+                else "ELEVATION-OBSERVED"
             )
-
-        # Extract forecast flow — prefer FLOW-COMBINE, fall back to FLOW
-        for var in ["FLOW-COMBINE", "FLOW"]:
-            forecast_var = forecast_site[forecast_site["variable"] == var]
-            if len(forecast_var) > 0:
-                break
-        if len(forecast_var) > 0:
-            ax.plot(
-                forecast_var["timestamp"],
-                forecast_var["value"],
-                marker="^",
-                linestyle="-.",
-                linewidth=2,
-                markersize=2.5,
-                label="Forecast",
-                color="orange",
-                alpha=0.7,
-                zorder=2,
+            stage_ylabel = (
+                "Elevation (ft)" if "ELEVATION" in stage_var else "Stage (ft)"
             )
+            _plot_site(
+                ax,
+                lb,
+                fc,
+                stage_var,
+                ["STAGE-COMBINE", "STAGE", "ELEVATION"],
+                stage_ylabel,
+                is_stage=True,
+            )
+            ax.set_title(
+                f"{site}  —  {stage_ylabel.split()[0]}", fontsize=10, fontweight="bold"
+            )
+            col += 1
 
-        ax.set_title(f"Site: {site}", fontsize=11, fontweight="bold")
-        ax.set_xlabel("Time", fontsize=10)
-        ax.set_ylabel("Flow (cfs)", fontsize=10)
-        ax.legend(loc="best", fontsize=9)
-        ax.grid(True, alpha=0.3)
+        if not has_flow and not has_stage:
+            # Fallback: plot whatever OBSERVED variable exists
+            obs_var = next(
+                (v for v in lb["variable"].unique() if "OBSERVED" in v), None
+            )
+            if obs_var:
+                ax = axes_grid[row_idx, 0]
+                ylabel = "Stage (ft)" if gtype == "stage" else "Flow (cfs)"
+                _plot_site(
+                    ax,
+                    lb,
+                    fc,
+                    obs_var,
+                    ["FLOW-COMBINE", "FLOW", "STAGE"],
+                    ylabel,
+                    is_stage=(gtype == "stage"),
+                )
+                ax.set_title(f"{site}", fontsize=10, fontweight="bold")
+                col = 1
 
-    fig.autofmt_xdate()
+        # Hide unused columns in this row
+        for c in range(col, max_cols):
+            axes_grid[row_idx, c].set_visible(False)
+
     plt.tight_layout()
     output_file = f"{OUTPUT_PATH}/02_hydrographs.png"
     plt.savefig(output_file, dpi=100, bbox_inches="tight")
     plt.close()
 
-    # print(f"Hydrographs saved: {output_file}")
     return n_sites
 
 
@@ -417,20 +691,24 @@ def process_nash_sutcliffe():
 
     # print(f"  Total records: {len(stats_df)}")
 
-    # Filter for Nash-Sutcliffe Efficiency if available
+    # Filter for all Observed Flow statistics
+    _OBSERVED_FLOW_TYPES = [
+        "Observed Flow Bias Ratio",
+        "Observed Flow Coefficient of Determination",
+        "Observed Flow Correlation Coefficient",
+        "Observed Flow Modified Kling-Gupta",
+        "Observed Flow Nash Sutcliffe",
+        "Observed Flow Percent Bias",
+        "Observed Flow RMSE Stdev",
+    ]
     if "StatisticType" in stats_df.columns:
         nse_stats = stats_df[
-            stats_df["StatisticType"].str.contains(
-                "Nash Sutcliffe", case=False, na=False
-            )
+            stats_df["StatisticType"].isin(_OBSERVED_FLOW_TYPES)
         ].copy()
     else:
         nse_stats = stats_df
 
     if len(nse_stats) == 0:
-        # print(
-        #     f"  Available statistic types: {stats_df.get('StatisticType', pd.Series()).unique() if 'StatisticType' in stats_df.columns else 'N/A'}"
-        # )
         nse_stats = stats_df.head(50)
 
     # Save to CSV
@@ -564,42 +842,30 @@ def main():
     # Create output directory
     Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
 
-    try:
-        # 1. Cumulative forcing
-        mrms_file = f"{FORCING_PATH}/mrms_qpe.nc"
-        if os.path.exists(mrms_file):
-            plot_cumulative_forcing(mrms_file)
-        else:
-            pass  # MRMS file not found
-
-        # 2. HRRR animation
-        hrrr_file = f"{FORCING_PATH}/hrrr_qpf.nc"
-        if os.path.exists(hrrr_file):
-            create_forecast_animation(hrrr_file)
-        else:
-            pass  # HRRR file not found
-
-        # 3. Hydrographs
-        # print("3. Hydrographs")
-        plot_hydrographs()
-
-        # 4. Nash-Sutcliffe stats
-        # print("4. Nash-Sutcliffe Statistics")
-        nse_stats = process_nash_sutcliffe()
-        if len(nse_stats) > 0 and "Value" in nse_stats.columns:
-            try:
-                mean_nse = nse_stats["Value"].mean()
-                # print(f"   Mean NSE: {mean_nse:.4f}")
-            except Exception:
-                pass
-
-        # 5. Junction map
-        # print("5. Junction Peak Flows Map")
-        _, high_flow_count = create_junction_map()
-        # print(f"   Junctions >50 cfs: {high_flow_count}")
-
-    except Exception as e:
-        return 1
+    for step, fn in [
+        (
+            "cumulative forcing",
+            lambda: (
+                plot_cumulative_forcing(f"{FORCING_PATH}/mrms_qpe.nc")
+                if os.path.exists(f"{FORCING_PATH}/mrms_qpe.nc")
+                else None
+            ),
+        ),
+        (
+            "HRRR animation",
+            lambda: (
+                create_forecast_animation(f"{FORCING_PATH}/hrrr_qpf.nc")
+                if os.path.exists(f"{FORCING_PATH}/hrrr_qpf.nc")
+                else None
+            ),
+        ),
+        ("hydrographs", plot_hydrographs),
+        ("nash-sutcliffe", process_nash_sutcliffe),
+    ]:
+        try:
+            fn()
+        except Exception as e:
+            print(f"  WARNING: {step} failed: {e}")
 
     # print(f"Analysis complete. Output: {OUTPUT_PATH}")
     return 0

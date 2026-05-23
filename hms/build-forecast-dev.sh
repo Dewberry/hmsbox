@@ -59,12 +59,14 @@ LOOKBACK_DSS_PATH="${CONTAINER_MODEL_DIR}/Lookback.dss"
 #     $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME
 
 # Option 5: Run without downloading (assumes data is already in place)
+#
+# --no-upoload flag prevents results from being uploaded back to S3, useful for testing locally without S3 access
+# --debug flag enables more verbose logging for troubleshooting
 docker run --rm \
     -v $HOST_MODEL_DIR:$CONTAINER_MODEL_DIR \
     -v $LOCAL_CONFIG:/app/config.yaml \
     -e HMS_S3_BUCKET="$HMS_S3_BUCKET" \
     $IMAGE \
-    --no-upload \
     $CONTAINER_MODEL_DIR/$HMS_MODEL_NAME
 
 if [ $? -eq 0 ]; then

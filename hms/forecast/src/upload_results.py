@@ -149,6 +149,9 @@ def construct_s3_paths(config: Dict, dt_values: Dict[str, int]) -> Dict[str, str
         "forecast_output": s3_paths["results"]["forecast_output"].format(
             **template_vars
         ),
+        "lookback_output": s3_paths["results"]["lookback_output"].format(
+            **template_vars
+        ),
     }
 
     return paths
@@ -224,6 +227,7 @@ def upload_all_results(s3_paths: Dict[str, str], config: Dict) -> bool:
     result_files = [
         ("stats.parquet", "lookback_stats"),
         ("forecast.parquet", "forecast_output"),
+        ("lookback.parquet", "lookback_output"),
     ]
 
     all_success = True

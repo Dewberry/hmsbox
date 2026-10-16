@@ -5,45 +5,50 @@ import os
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 import boto3
+import sozipfile.sozipfile as sozip
 from botocore.exceptions import ClientError
-
+from compression import recommended_compression_method
 from vault_logging import setup_json_logging
 
 
-def unpack_local_file(parquet_file: str, output_dir: str, workers: int = None) -> bool:
+def unpack_local_file(input_file: str, output_dir: str, workers: int = None) -> bool:
     """
-    Unpack a local Parquet file using modelvault.
+    Unpack a local model vault archive (SOZip/zip, or Parquet via modelvault).
 
     Args:
-        parquet_file: Path to the local Parquet file
+        input_file: Path to the local archive file
         output_dir: Directory to extract files into
-        workers: Number of concurrent workers (optional)
+        workers: Number of concurrent workers for Parquet archives (optional)
 
     Returns:
         True if successful, False otherwise
     """
     logger = setup_json_logging()
 
-    if not os.path.exists(parquet_file):
-        logger.error(f"Parquet file not found: {parquet_file}")
+    if not os.path.exists(input_file):
+        logger.error(f"Input not found: {input_file}")
         return False
 
-    if not os.path.isfile(parquet_file):
-        logger.error(f"Path is not a file: {parquet_file}")
+    if not os.path.isfile(input_file):
+        logger.error(f"Input is not a file: {input_file}")
         return False
 
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
+
+    if zipfile.is_zipfile(input_file):
+        return extract_zip(input_file, output_dir, logger)
 
     # Build modelvault command
     cmd = [
         "modelvault",
         "unpack",
         "--input-file",
-        parquet_file,
+        input_file,
         "--output-dir",
         output_dir,
     ]
@@ -51,12 +56,12 @@ def unpack_local_file(parquet_file: str, output_dir: str, workers: int = None) -
     if workers:
         cmd.extend(["--workers", str(workers)])
 
-    logger.debug(f"Unpacking local file: {parquet_file}")
+    logger.debug(f"Unpacking local file: {input_file}")
     logger.debug(f"Output directory: {output_dir}")
 
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        logger.debug(f"Successfully unpacked {parquet_file}")
+        logger.debug(f"Successfully unpacked {input_file}")
         if result.stdout:
             logger.debug(f"modelvault output: {result.stdout}")
         return True
@@ -123,12 +128,12 @@ def fetch_and_unpack(
     observations_uris: list = None,
 ) -> bool:
     """
-    Fetch a Parquet file from S3 and unpack it, optionally downloading forcing and observations data.
+    Fetch a model archive (Parquet vault or .zip) from S3 and unpack it, optionally downloading forcing and observations data.
 
     Args:
         s3_uri: S3 URI (e.g., s3://bucket/path/to/file.parquet)
         output_dir: Directory to extract files into
-        workers: Number of concurrent workers (optional)
+        workers: Number of concurrent workers. Only affects Parquet vault unpacking. (optional)
         forcing_uris: List of S3 URIs for forcing data files (optional)
         observations_uris: List of S3 URIs for observations data files (optional)
 
@@ -238,6 +243,129 @@ def fetch_and_unpack(
                 logger.warning(f"Failed to remove temporary file {temp_file}: {e}")
 
 
+def make_sozip_of_dir(input_dir: str, output_file: str) -> bool:
+    """Make a new SOZip (.zip) archive file from an existing directory."""
+    err = False
+    logger = setup_json_logging()
+    logger.info(f"SOZipping: {input_dir} -> {output_file}")
+
+    root = Path(input_dir)
+    output = Path(output_file)
+
+    # Validate args
+    if not root.is_dir():
+        logger.error(f"Not a directory: {input_dir}")
+        err = True
+    if output.suffix != ".zip":
+        logger.error(f"Output must be a .zip file but got: {output.suffix}")
+        err = True
+    if output.exists():
+        logger.error(f"Output already exists: {output_file}")
+        err = True
+    if err:
+        return False
+
+    # Validate contents of dir
+    entries = sorted(root.rglob("*"))
+    for path in entries:
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            logger.error(f"Unsupported entry: {path}")
+            err = True
+    if err:
+        return False
+
+    # Make the sozip
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=output.parent) as tmp_dir:
+            archive_file = Path(tmp_dir) / "model.zip"
+            logger.debug(f"Writing to tmp archive: {archive_file}")
+            with sozip.ZipFile(
+                archive_file, "w", compression=sozip.ZIP_DEFLATED, allowZip64=True
+            ) as archive:
+                for path in entries:
+                    method = (
+                        zipfile.ZIP_STORED
+                        if path.is_dir()
+                        else recommended_compression_method(path, logger)
+                    )
+                    archive.write(
+                        path, path.relative_to(root).as_posix(), compress_type=method
+                    )
+            logger.debug(f"Moving tmp archive: {archive_file} -> {output}")
+            os.replace(archive_file, output)
+    except (ImportError, OSError, RuntimeError, ValueError) as e:
+        logger.error(f"Failed to SOZip: {input_dir} -> {output_file}")
+        return False
+
+    logger.info(f"SOZipped: {input_dir} -> {output_file}")
+    return True
+
+
+def vault_to_sozip(input_file: str, output_file: str) -> bool:
+    """Convert an existing model vault (.parquet) or .zip into a new SOZip file by extracting, then repacking."""
+    logger = setup_json_logging()
+    input_path = Path(input_file)
+    output = Path(output_file)
+
+    err = False
+    if (
+        not input_path.is_file()
+        or input_path.suffix not in (".parquet", ".zip")
+        or output.suffix != ".zip"
+    ):
+        logger.error(
+            f"Conversion requires a .parquet or .zip input file, and a .zip output, but got {input_file!r} and {output_file!r}"
+        )
+        err = True
+    if input_path.suffix.lower() == ".zip" and not zipfile.is_zipfile(input_path):
+        logger.error(f"Invalid input .zip: {input_file}")
+        err = True
+    if output.exists():
+        logger.error(f"Output already exists: {output_file}")
+        err = True
+    if err:
+        return False
+
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=output.parent) as tmp_dir:
+            model_dir = Path(tmp_dir) / "model"
+            if not unpack_local_file(input_file, str(model_dir)):
+                return False
+            if not make_sozip_of_dir(str(model_dir), output_file):
+                return False
+    except (ImportError, OSError, RuntimeError, ValueError) as e:
+        logger.error(f"Failed to convert {input_file} -> {output_file}: {e}")
+        return False
+
+    logger.info(f"Converted: {input_file} -> {output_file}")
+    return True
+
+
+def extract_zip(zip_file: str, output_dir: str, logger) -> bool:
+    """Extract a .zip after validating that no paths escape the output directory."""
+    logger.info(f"Extracting: {zip_file} -> {output_dir}")
+    root = Path(output_dir).resolve()
+    try:
+        with zipfile.ZipFile(zip_file) as zf:
+            for member in zf.infolist():
+                try:
+                    member_path = Path(member.filename)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise ValueError("Unsafe member path")
+                    (root / member.filename).resolve().relative_to(root)
+                except ValueError:
+                    logger.error(f"Unsafe path in zip archive {zip_file}: {member}")
+                    return False
+            zf.extractall(root)
+    except (zipfile.BadZipFile, OSError, RuntimeError, ValueError):
+        logger.error(f"Failed to extract: {zip_file} -> {output_dir}")
+        return False
+    logger.info(f"Successfully extracted: {zip_file} -> {output_dir}")
+    return True
+
+
 def main():
     """Main entry point for vault operations."""
     parser = argparse.ArgumentParser(
@@ -245,6 +373,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
         Examples:
+        # Pack a model directory to a new SOZip .zip, or re-pack an existing Parquet vault or .zip to a new SOZip .zip.
+        vault.py pack /path/to/model /output/model.zip
+        vault.py pack /path/to/model.parquet /output/model.zip
+        vault.py pack /path/to/model.zip /output/model.zip
+
         # Unpack a local file
         vault.py unpack /path/to/model.parquet /output/dir
 
@@ -258,12 +391,30 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
+    pack_parser = subparsers.add_parser(
+        "pack",
+        help="Pack a model directory to a new SOZip .zip, or re-pack an existing Parquet vault or .zip to a new SOZip .zip.",
+    )
+    pack_parser.add_argument(
+        "input_path",
+        help="Existing model directory, .parquet vault file, or .zip file to be SOZipped.",
+    )
+    pack_parser.add_argument(
+        "output_file", help="New .zip output path (must not yet exist)."
+    )
+
     # Unpack subcommand
-    unpack_parser = subparsers.add_parser("unpack", help="Unpack a local Parquet file")
-    unpack_parser.add_argument("input_file", help="Path to the Parquet file")
+    unpack_parser = subparsers.add_parser(
+        "unpack", help="Unpack a local Parquet vault file or .zip file"
+    )
+    unpack_parser.add_argument(
+        "input_file", help="Path to the local Parquet vault file or .zip file"
+    )
     unpack_parser.add_argument("output_dir", help="Directory to extract files into")
     unpack_parser.add_argument(
-        "--workers", type=int, help="Number of concurrent file writers (optional)"
+        "--workers",
+        type=int,
+        help="Number of concurrent file writers. Only affects Parquet vault unpacking. (optional)",
     )
 
     # Fetch-and-unpack subcommand
@@ -271,7 +422,8 @@ def main():
         "fetch-and-unpack", help="Fetch from S3 and unpack"
     )
     fetch_parser.add_argument(
-        "s3_uri", help="S3 URI (e.g., s3://bucket/path/to/file.parquet)"
+        "s3_uri",
+        help="S3 URI (e.g., s3://bucket/path/to/file.parquet or s3://bucket/path/to/file.zip)",
     )
     fetch_parser.add_argument(
         "output_dir", help="Directory to extract files into", nargs="?"
@@ -297,7 +449,17 @@ def main():
         return 1
 
     # Route to appropriate function
-    if args.command == "unpack":
+    if args.command == "pack":
+        input_path = Path(args.input_path)
+        if input_path.is_dir():
+            success = make_sozip_of_dir(args.input_path, args.output_file)
+        elif input_path.is_file() and input_path.suffix.lower() in (".parquet", ".zip"):
+            success = vault_to_sozip(args.input_path, args.output_file)
+        else:
+            pack_parser.error(
+                f"input_path must be an existing model directory, .parquet vault file, or .zip file. Provided: {args.input_path}"
+            )
+    elif args.command == "unpack":
         success = unpack_local_file(args.input_file, args.output_dir, args.workers)
     elif args.command == "fetch-and-unpack":
         # If output_dir is not provided, use /mnt/data/unpacked

@@ -7,7 +7,7 @@ model_version: "trinity-v20260509"
 # S3 path templates - {year}, {month}, {day}, {hour} will be replaced with actual values
 # {S3_BUCKET} will be replaced with HMS_S3_BUCKET environment variable (required)
 s3_paths:
-  # Model vault path
+  # Model vault path (.parquet file or .zip file)
   model_vault: "s3://{S3_BUCKET}/dev/models/{model_version}.parquet"
 
   # Forcing data paths

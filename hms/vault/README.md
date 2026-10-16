@@ -4,10 +4,11 @@ Docker container for unpacking model archives from local or S3 storage using [mo
 
 ## Overview
 
-This container provides a simple interface to unpack Parquet-based model archives into their original file structures. Two operations are supported:
+This container provides a simple interface to unpack models stored as Parquet vault files or .zip archives, as well as pack or repack models into new SOZip .zip archives. Three operations are supported:
 
-1. **`unpack`**: Extract a local Parquet archive
-2. **`fetch-and-unpack`**: Download a Parquet archive from S3 and extract it. Optionally download additional forcing and observations data files from S3 to subdirectories alongside the model files.
+1. **`unpack`**: Extract a local Parquet vault file or .zip archive
+2. **`fetch-and-unpack`**: Download a Parquet vault file or .zip archive from S3 and extract it. Optionally download additional forcing and observations data files from S3 to subdirectories alongside the model files.
+3. **`pack`**: Pack an HMS model directory, or repack an existing Parquet vault file or .zip file, into a new [Seek-Optimized ZIP (SOZip)](https://sozip.org) (`.zip`) archive.
 
 For details on the modelvault format, archive structure, and pack/unpack operations, see the [modelvault repository](https://github.com/Dewberry/modelvault).
 
@@ -47,9 +48,31 @@ This will extract:
 
 ## Commands
 
+### `pack` - Create a new SOZip .zip file from a model directory, Parquet vault file, or .zip
+
+```bash
+pack /mnt/data/model /mnt/data/model.zip
+pack /mnt/data/model.parquet /mnt/data/model.zip
+pack /mnt/data/model.zip /mnt/data/model-sozip.zip
+```
+
+The input must be either an existing model directory, or `.parquet` vault file, or valid `.zip` file.
+
+Directories are packed directly. Archive files are extracted fully first, and then repacked.
+
+The output must not already exist.
+
+#### ZIP Creation Details
+
+Symlinks and special files in source directories are rejected rather than followed.
+
+When packing, members with extension `.tif`, `.tiff`, and `.zip` are inspected to determine if they are alrady compressed. If so, then they are stored as `ZIP_STORED` in the resulting SOZip file (not compressed further). Otherwise, they are compressed with `ZIP_DEFLATED`. TODO: This could be further optimized by inspecting other common file types found in HMS models such as NetCDF files and DSS files and avoiding further compression of those formats, as well.
+
+Parquet input is restored with `modelvault` before repacking to SOZip. Original files structure is retained, but Parquet catalog (including model name/version, file hashes, and packing timestamps) are not retained.
+
 ### `unpack` - Extract Local Archive
 
-Unpack a local Parquet file to a directory.
+Unpack a local Parquet or .zip file to a directory.
 
 **Usage:**
 ```bash
@@ -57,7 +80,7 @@ docker run [OPTIONS] hmsbox-vault:latest unpack INPUT_FILE OUTPUT_DIR [--workers
 ```
 
 **Arguments:**
-- `INPUT_FILE`: Path to the Parquet archive file
+- `INPUT_FILE`: Path to the Parquet or .zip archive file
 - `OUTPUT_DIR`: Directory where files will be extracted
 - `--workers N` (optional): Number of concurrent file writers (default: auto-detected CPU count)
 
@@ -68,7 +91,7 @@ docker run -v /data:/mnt/data hmsbox-vault:latest unpack /mnt/data/model.parquet
 
 ### `fetch-and-unpack` - Download and Extract from S3
 
-Download a Parquet archive from S3 and extract it in one operation. Optionally download additional forcing and observations data files.
+Download a Parquet or .zip archive from S3 and extract it in one operation. Optionally download additional forcing and observations data files.
 
 **Usage:**
 ```bash
@@ -76,7 +99,7 @@ docker run [OPTIONS] hmsbox-vault:latest fetch-and-unpack S3_URI [OUTPUT_DIR] [-
 ```
 
 **Arguments:**
-- `S3_URI`: S3 URI in format `s3://bucket/path/to/file.parquet`
+- `S3_URI`: S3 URI in format `s3://bucket/path/to/file.parquet` or `s3://bucket/path/to/file.zip`
 - `OUTPUT_DIR` (optional): Directory to extract files into (default: `/mnt/data/unpacked`)
 - `--workers N` (optional): Number of concurrent file writers (default: auto-detected CPU count)
 - `--forcing URI` (optional): S3 URI for forcing data file. Can be specified multiple times for multiple files

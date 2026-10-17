@@ -6,6 +6,7 @@ Convert HEC-DSS files to/from Parquet / NetCDF (coming soon) format for efficien
 
 - **DSS to Parquet**: Extract time series data from HEC-DSS files into columnar Parquet format
 - **Parquet to DSS**: Convert Parquet data back to HEC-DSS format
+- **HMS results to grid**: Export HMS results to timeseries NetCDF grid.
 - **Iceberg Schema Support**: Default export uses semantic column names (timestamp, provider, site_id, variable, qualifier)
 - **DSS Schema Support**: Optional generic DSS column names (datetime, A, B, C, F) with `--no-iceberg-schema`
 - **Smart D Part Handling**: D part (date range) excluded from exports and auto-generated during imports
@@ -117,6 +118,30 @@ The D part (date range) is automatically calculated from the time series data du
 docker run -v $(pwd):/data hmsbox-converter:latest \
   parquet-to-dss /data/results.parquet \
   -o /data/output.dss
+```
+
+### hms-results-to-delin-grid
+
+Export HMS results to timeseries NetCDF grid using an inferred grid transform, typically SHG x Subbasins.
+
+Stage 1 is optional and writes GIS files for review.
+
+Stage 2 performs the extraction to NetCDF.
+
+For implementation details, see docstring at: [hms/converter/src/hms_results_delin_grid.py](/hms/converter/src/hms_results_delin_grid.py)
+
+For usage details, see CLI subparser for `hms-results-to-delin-grid` at: [hms/converter/src/convert.py](/hms/converter/src/convert.py)
+
+Example usage from repo root:
+
+```sh
+cd hms/converter
+# Help
+uv run -m src.convert hms-results-to-delin-grid --help
+# Stage 1:
+uv run -m src.convert hms-results-to-delin-grid -s 1 "/path/to/results/RUN_Forecast.h5" "/path/to/Forecast.sqlite" "/output/dir"
+# Stage 2:
+uv run -m src.convert hms-results-to-delin-grid -s 2 "/path/to/results/RUN_Forecast.h5" "/path/to/Forecast.sqlite" "/output/file.nc" --hms-results-var "Incremental Excess"
 ```
 
 ## Important Notes

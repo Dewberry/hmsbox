@@ -11,7 +11,11 @@ from pathlib import Path
 import boto3
 import sozipfile.sozipfile as sozip
 from botocore.exceptions import ClientError
-from compression import recommended_compression_method
+from compression import (
+    SOZIP_CHUNK_SIZE_KB,
+    SOZIP_MIN_DEFLATE_SIZE_KB,
+    recommended_compression_method,
+)
 from vault_logging import setup_json_logging
 
 
@@ -243,8 +247,14 @@ def fetch_and_unpack(
                 logger.warning(f"Failed to remove temporary file {temp_file}: {e}")
 
 
-def make_sozip_of_dir(input_dir: str, output_file: str) -> bool:
-    """Make a new SOZip (.zip) archive file from an existing directory."""
+def make_sozip_of_dir(
+    input_dir: str,
+    output_file: str,
+    chunk_size_kb: int = SOZIP_CHUNK_SIZE_KB,
+    min_deflate_size_kb: int = SOZIP_MIN_DEFLATE_SIZE_KB,
+    no_inspect_existing_compression: bool = False,
+) -> bool:
+    """Make a new SOZip (.zip) archive file from an existing directory. See CLI help for parameters."""
     err = False
     logger = setup_json_logging()
     logger.info(f"SOZipping: {input_dir} -> {output_file}")
@@ -281,13 +291,18 @@ def make_sozip_of_dir(input_dir: str, output_file: str) -> bool:
             archive_file = Path(tmp_dir) / "model.zip"
             logger.debug(f"Writing to tmp archive: {archive_file}")
             with sozip.ZipFile(
-                archive_file, "w", compression=sozip.ZIP_DEFLATED, allowZip64=True
+                archive_file, "w", allowZip64=True, chunk_size=chunk_size_kb * 1024
             ) as archive:
                 for path in entries:
                     method = (
                         zipfile.ZIP_STORED
                         if path.is_dir()
-                        else recommended_compression_method(path, logger)
+                        else recommended_compression_method(
+                            path,
+                            logger,
+                            min_deflate_size_kb=min_deflate_size_kb,
+                            no_inspect_existing_compression=no_inspect_existing_compression,
+                        )
                     )
                     archive.write(
                         path, path.relative_to(root).as_posix(), compress_type=method
@@ -295,15 +310,21 @@ def make_sozip_of_dir(input_dir: str, output_file: str) -> bool:
             logger.debug(f"Moving tmp archive: {archive_file} -> {output}")
             os.replace(archive_file, output)
     except (ImportError, OSError, RuntimeError, ValueError) as e:
-        logger.error(f"Failed to SOZip: {input_dir} -> {output_file}")
+        logger.error(f"Failed to SOZip: {input_dir} -> {output_file}. Error: {e}")
         return False
 
     logger.info(f"SOZipped: {input_dir} -> {output_file}")
     return True
 
 
-def vault_to_sozip(input_file: str, output_file: str) -> bool:
-    """Convert an existing model vault (.parquet) or .zip into a new SOZip file by extracting, then repacking."""
+def vault_to_sozip(
+    input_file: str,
+    output_file: str,
+    chunk_size_kb: int = SOZIP_CHUNK_SIZE_KB,
+    min_deflate_size_kb: int = SOZIP_MIN_DEFLATE_SIZE_KB,
+    no_inspect_existing_compression: bool = False,
+) -> bool:
+    """Convert an existing model vault (.parquet) or .zip into a new SOZip file by extracting, then repacking. See CLI help for parameters."""
     logger = setup_json_logging()
     input_path = Path(input_file)
     output = Path(output_file)
@@ -333,7 +354,13 @@ def vault_to_sozip(input_file: str, output_file: str) -> bool:
             model_dir = Path(tmp_dir) / "model"
             if not unpack_local_file(input_file, str(model_dir)):
                 return False
-            if not make_sozip_of_dir(str(model_dir), output_file):
+            if not make_sozip_of_dir(
+                str(model_dir),
+                output_file,
+                chunk_size_kb=chunk_size_kb,
+                min_deflate_size_kb=min_deflate_size_kb,
+                no_inspect_existing_compression=no_inspect_existing_compression,
+            ):
                 return False
     except (ImportError, OSError, RuntimeError, ValueError) as e:
         logger.error(f"Failed to convert {input_file} -> {output_file}: {e}")
@@ -393,6 +420,7 @@ def main():
 
     pack_parser = subparsers.add_parser(
         "pack",
+        allow_abbrev=False,
         help="Pack a model directory to a new SOZip .zip, or re-pack an existing Parquet vault or .zip to a new SOZip .zip.",
     )
     pack_parser.add_argument(
@@ -401,6 +429,37 @@ def main():
     )
     pack_parser.add_argument(
         "output_file", help="New .zip output path (must not yet exist)."
+    )
+    pack_parser.add_argument(
+        "-c",
+        "--chunk-size-kb",
+        type=int,
+        default=SOZIP_CHUNK_SIZE_KB,
+        help=f"""SOZip chunk size in KB. Default: {SOZIP_CHUNK_SIZE_KB}.
+Note that GDAL's sozip utility uses 64 KB as the chunk size,
+but for cloud storage, >= 256 KB is recommended to reduce the number of requests.
+""",
+    )
+    pack_parser.add_argument(
+        "-s",
+        "--min-deflate-size-kb",
+        type=int,
+        default=SOZIP_MIN_DEFLATE_SIZE_KB,
+        help=f"""Kilobytes. Default: {SOZIP_MIN_DEFLATE_SIZE_KB}.
+For each file, if smaller than this, use ZIP_STORED (do not compress, do not chunk) instead of ZIP_DEFLATED.
+Provide 0 to ignore file size.
+Note that GDAL's sozip utility uses 1024 KB (1 MB) as the minimum deflate size,
+but a HEC-HMS model may contain a significant number of files in the 100 KB range.""",
+    )
+    pack_parser.add_argument(
+        "-e",
+        "--no-inspect-exist-compress",
+        dest="no_inspect_existing_compression",
+        action="store_true",
+        help="""For each file, do not inspect existing compression.
+Instead, choose compression based on file size only.
+Overrides the default behavior which applies ZIP_STORED (do not compress, do not chunk)
+for some extensions (e.g. .tif, .zip) after inspecting them to determine if they are already compressed.""",
     )
 
     # Unpack subcommand
@@ -450,11 +509,22 @@ def main():
 
     # Route to appropriate function
     if args.command == "pack":
+        if args.chunk_size_kb <= 0:
+            pack_parser.error("--chunk-size-kb must be positive")
+        if args.min_deflate_size_kb < 0:
+            pack_parser.error("--min-deflate-size-kb must be non-negative")
+        pack_options = {
+            "chunk_size_kb": args.chunk_size_kb,
+            "min_deflate_size_kb": args.min_deflate_size_kb,
+            "no_inspect_existing_compression": args.no_inspect_existing_compression,
+        }
         input_path = Path(args.input_path)
         if input_path.is_dir():
-            success = make_sozip_of_dir(args.input_path, args.output_file)
+            success = make_sozip_of_dir(
+                args.input_path, args.output_file, **pack_options
+            )
         elif input_path.is_file() and input_path.suffix.lower() in (".parquet", ".zip"):
-            success = vault_to_sozip(args.input_path, args.output_file)
+            success = vault_to_sozip(args.input_path, args.output_file, **pack_options)
         else:
             pack_parser.error(
                 f"input_path must be an existing model directory, .parquet vault file, or .zip file. Provided: {args.input_path}"

@@ -436,7 +436,7 @@ def main():
         type=int,
         default=SOZIP_CHUNK_SIZE_KB,
         help=f"""SOZip chunk size in KB. Default: {SOZIP_CHUNK_SIZE_KB}.
-Note that GDAL's sozip utility uses 64 KB as the chunk size,
+Note that GDAL's sozip utility uses 32 KB as the chunk size,
 but for cloud storage, >= 256 KB is recommended to reduce the number of requests.
 """,
     )

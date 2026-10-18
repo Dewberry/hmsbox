@@ -69,7 +69,7 @@ Symlinks and special files in source directories are rejected rather than follow
 By default, when adding some files to the archive (e.g. existing .tif and .zip files), they are inspected to determine if they are already compressed,
 and if so they are stored as ZIP_STORED (do not compress, do not chunk) regardless of size. To disable this behavior (to use size only to choose compression and chunking), provide `--no-inspect-exist-compress`. Since .zip files can contain a mix of compressed and uncompressed members, the adequacy of the existing compressed is False if its uncompressed members total more than 4 MB or represent more than 20% of the total bytes.
 
-- `--chunk-size-kb`: SOZip chunk size in KB. Default: 512 KB. Note that GDAL's sozip utility uses 64 KB as the chunk size, but for cloud storage, >= 256 KB is recommended to reduce the number of requests.
+- `--chunk-size-kb`: SOZip chunk size in KB. Default: 512 KB. Note that GDAL's sozip utility uses 32 KB as the chunk size, but for cloud storage, >= 256 KB is recommended to reduce the number of requests.
 - `--min-deflate-size-kb`: Kilobytes. Default: 64 KB. For each file, if smaller than this, use ZIP_STORED (do not compress, do not chunk) instead of ZIP_DEFLATED. Provide 0 to ignore file size. Note that GDAL's sozip utility uses 1024 KB (1 MB) as the minimum deflate size, but a HEC-HMS model may contain a significant number of files in the 100 KB range.
 - `--no-inspect-exist-compress`: For each file, do not inspect existing compression. Instead, choose compression based on file size only. Overrides the default behavior which applies ZIP_STORED (do not compress, do not chunk) for some extensions (e.g. .tif, .zip) after inspecting them to determine if they are already compressed.
 

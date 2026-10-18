@@ -6,6 +6,8 @@ Utility functions for downloading and unpacking model vault data from S3.
 import os
 import subprocess
 import tempfile
+import zipfile
+from pathlib import Path
 from typing import Optional
 
 import boto3
@@ -53,38 +55,64 @@ def download_s3_file(s3_uri: str, output_path: str, logger) -> bool:
         return False
 
 
+def extract_zip(zip_file: str, output_dir: str, logger) -> bool:
+    """Extract a .zip, rejecting paths that escape the output directory."""
+    logger.info(f"Extracting: {zip_file} -> {output_dir}")
+    root = Path(output_dir).resolve()
+    try:
+        with zipfile.ZipFile(zip_file) as zf:
+            for member in zf.infolist():
+                try:
+                    member_path = Path(member.filename)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise ValueError("Unsafe member path")
+                    (root / member.filename).resolve().relative_to(root)
+                except ValueError:
+                    logger.error(f"Unsafe path in zip archive {zip_file}: {member}")
+                    return False
+            zf.extractall(root)
+    except (zipfile.BadZipFile, OSError, RuntimeError, ValueError):
+        logger.error(f"Failed to extract: {zip_file} -> {output_dir}")
+        return False
+    logger.info(f"Successfully extracted: {zip_file} -> {output_dir}")
+    return True
+
+
 def unpack_local_file(
-    parquet_file: str, output_dir: str, logger, workers: int = None
+    input_file: str, output_dir: str, logger, workers: int = None
 ) -> bool:
     """
-    Unpack a local Parquet file using modelvault.
+    Unpack a local Parquet file using modelvault, or extract a local .zip file.
 
     Args:
-        parquet_file: Path to the local Parquet file
+        input_file: Path to the local archive file
         output_dir: Directory to extract files into
         logger: Logger instance
-        workers: Number of concurrent workers (optional)
+        workers: Number of concurrent workers. Only applied to Parquet archives. (optional)
 
     Returns:
         True if successful, False otherwise
     """
-    if not os.path.exists(parquet_file):
-        logger.error(f"Parquet file not found: {parquet_file}")
+    if not os.path.exists(input_file):
+        logger.error(f"Archive file not found: {input_file}")
         return False
 
-    if not os.path.isfile(parquet_file):
-        logger.error(f"Path is not a file: {parquet_file}")
+    if not os.path.isfile(input_file):
+        logger.error(f"Path is not a file: {input_file}")
         return False
 
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
+
+    if zipfile.is_zipfile(input_file):
+        return extract_zip(input_file, output_dir, logger)
 
     # Build modelvault command
     cmd = [
         "modelvault",
         "unpack",
         "--input-file",
-        parquet_file,
+        input_file,
         "--output-dir",
         output_dir,
     ]
@@ -92,12 +120,12 @@ def unpack_local_file(
     if workers:
         cmd.extend(["--workers", str(workers)])
 
-    logger.debug(f"Unpacking local file: {parquet_file}")
+    logger.debug(f"Unpacking local file: {input_file}")
     logger.debug(f"Output directory: {output_dir}")
 
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        logger.debug(f"Successfully unpacked {parquet_file}")
+        logger.debug(f"Successfully unpacked {input_file}")
         if result.stdout:
             logger.debug(f"modelvault output: {result.stdout}")
         return True
@@ -119,10 +147,10 @@ def unpack_modelvault(
     s3_uri: str, output_dir: str, logger, workers: int = None
 ) -> bool:
     """
-    Fetch a Parquet model vault from S3 and unpack it.
+    Fetch a model vault (SOZip/zip or Parquet) from S3 and unpack it.
 
     Args:
-        s3_uri: S3 URI (e.g., s3://bucket/path/to/file.parquet)
+        s3_uri: S3 URI (e.g., s3://bucket/path/to/model.zip)
         output_dir: Directory to extract files into
         logger: Logger instance
         workers: Number of concurrent workers (optional)

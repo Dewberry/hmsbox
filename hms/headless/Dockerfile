@@ -159,7 +159,7 @@ if [ ! -f "$JAVA_EXE" ]; then
 fi
 
 # Build library path by finding all potential library locations
-LIBRARY_PATH="${HMS_HOME}/bin:${HMS_HOME}/lib:${HMS_HOME}/jre/lib/server"
+LIBRARY_PATH="${HMS_HOME}/bin:${HMS_HOME}/bin/javaHeclib:${HMS_HOME}/lib:${HMS_HOME}/jre/lib/server"
 
 # Add any gdal-related directories
 if [ -d "${HMS_HOME}/bin/gdal" ]; then

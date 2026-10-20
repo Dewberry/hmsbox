@@ -90,7 +90,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create non-root user
 RUN useradd -m -u 1000 hms
 
-COPY --from=javabuilder /hec-hms /hec-hms
+COPY --from=javabuilder --chown=hms:hms /hec-hms /hec-hms
 RUN rm -f /hec-hms/lib && mkdir -p /hec-hms/lib
 COPY --from=javabuilder /app/build/libs/hms-compute.jar /hec-hms/lib/hms-compute.jar
 
@@ -142,7 +142,7 @@ ENV PROJ_LIB=$HMS_HOME/bin/gdal/proj
 ENV CLASSPATH=$HMS_HOME/*:$HMS_HOME/lib/*:$HMS_HOME/lib/hec/*:$HMS_HOME/jre/lib/*
 ENV HDF5_DISABLE_ERROR_STACK=1
 
-RUN chmod +x $HMS_HOME/jre/bin/java && chown -R hms:hms /hec-hms
+RUN chmod +x $HMS_HOME/jre/bin/java
 
 # Create a shell wrapper for proper variable expansion at build time (before USER hms)
 RUN cat > /usr/local/bin/run-hms.sh <<'SCRIPT'

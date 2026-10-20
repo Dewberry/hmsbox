@@ -122,7 +122,13 @@ docker run -v $(pwd):/data hmsbox-converter:latest \
 
 ### hms-results-to-delin-grid
 
-Export HMS results to timeseries NetCDF grid using an inferred grid transform, typically SHG x Subbasins.
+Export HMS (polygon-based) results to timeseries NetCDF grid, using the resolution and
+alignment of a provided explicit "match raster" or a grid inferred from the staircase
+pattern of the HMS discretization polygons.
+
+The output grid is sized to minimally cover the discretization polygons, while retaining pixel snapping.
+
+Choose either `--infer-raster` or `--match-raster <PATH>` (required, mutually exclusive).
 
 Stage 1 is optional and writes GIS files for review.
 
@@ -132,16 +138,47 @@ For implementation details, see docstring at: [hms/converter/src/hms_results_del
 
 For usage details, see CLI subparser for `hms-results-to-delin-grid` at: [hms/converter/src/convert.py](/hms/converter/src/convert.py)
 
+`--chunk-time` and `--chunk-px` can be used to set the temporal and spatial chunking settings of the output NetCDF file.
+
+They default to `1` (1 timestep) and `128` (128x128 pixel blocks), respectively.
+
+The spatial chunk size must not exceed the smaller grid dimension.
+
 Example usage from repo root:
 
 ```sh
 cd hms/converter
+
 # Help
 uv run -m src.convert hms-results-to-delin-grid --help
-# Stage 1:
-uv run -m src.convert hms-results-to-delin-grid -s 1 "/path/to/results/RUN_Forecast.h5" "/path/to/Forecast.sqlite" "/output/dir"
-# Stage 2:
-uv run -m src.convert hms-results-to-delin-grid -s 2 "/path/to/results/RUN_Forecast.h5" "/path/to/Forecast.sqlite" "/output/file.nc" --hms-results-var "Incremental Excess"
+
+# Explicit match raster, optional Stage 1 for optional review before Stage 2.
+uv run -m src.convert hms-results-to-delin-grid \
+    -s 1 \
+    ../../model/Punx/results/RUN_Sep_2018.h5 \
+    ../../model/Punx/punxsutawney.sqlite \
+    ../../model/Punx/results_extracted/ \
+    --match-raster ../../model/Punx/terrain/NED_30m/00/elevation.tif
+
+# Explicit match raster, Stage 2 to write the NetCDF.
+uv run -m src.convert hms-results-to-delin-grid \
+    -s 2 \
+    ../../model/Punx/results/RUN_Sep_2018.h5 \
+    ../../model/Punx/punxsutawney.sqlite \
+    ../../model/Punx/results_extracted/RUN_Sep_2018_export_match.nc \
+    --hms-results-var "Incremental Excess" \
+    --match-raster ../../model/Punx/terrain/NED_30m/00/elevation.tif \
+    --chunk-time 1 \
+    --chunk-px 128
+
+# Inferred grid, Stage 1
+uv run -m src.convert hms-results-to-delin-grid \
+    -s 1 \
+    ../../model/trinity/results/RUN_Forecast.h5 \
+    ../../model/trinity/Forecast.sqlite \
+    ../../model/trinity/results_extracted/ \
+    --infer-raster
+
 ```
 
 ## Important Notes

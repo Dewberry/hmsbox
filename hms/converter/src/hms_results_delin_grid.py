@@ -1,20 +1,38 @@
-"""Export HMS results to timeseries NetCDF grid using an inferred grid transform, typically SHG x Subbasins.
+"""Export HMS results to timeseries NetCDF grid.
 
+This tool has two stages.
+Stage 1 is optional and writes review layers.
+Stage 2 writes the NetCDF, and does not read the Stage 1 outputs, but does leverage many of the same algorithms as Stage 1.
 
-Stage 1:
-    Optional. Infer a gridding strategy from the HMS discretization's final polygon
-    staircase pattern.
+Must use either --match-raster <path>, or --infer-raster, not both.
 
-    Write:
-        A 1-band tif of the inferred grid with randomized cell groups for visual review.
-        A fgb file of slivers found, as polygons. Another fgb of representative points.
-        A report json file.
+With --match-raster, use an existing raster to define the output grid's resolution and alignment. The output grid is sized to minimally cover the discretization polygons, while preserving pixel snapping. CRS must be equivalent to that of the discretization polygons. Filepath or GDAL /vsi*/ path.
 
-    Stage 1 output files are only for review and are not ingested by Stage 2.
-    Stage 1 may be skipped if confident that the gridding plan will be sufficient.
+With --infer-raster, infer grid alignment and resolution from the discretization polygons' staircase pattern (commonly SHG x Subbasins).
 
-Stage 2:
-    Using the same gridding strategy as Stage 1, export a timeseries variable to NetCDF.
+In either case, the output CRS is the verbatim CRS WKT of the discretization polygon layer.
+
+Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
+
+Sampling approach:
+    1. Sample the raw results (polygon) data at the center of each output pixel.
+
+    2. If a pixel's center misses the polygons but part of the pixel touches 1 or more polygons,
+    then assign the value from the polygon with the greatest overlap.
+
+Stages details:
+    Stage 1:
+        Optional. Write:
+            A 1-band tif of the output grid with randomized cell groups for visual review.
+            A fgb file of slivers found, as polygons. Another fgb of representative points.
+            A report json file.
+        Stage 1 output files are only for review and are not ingested by Stage 2.
+        Stage 1 may be skipped if confident that the gridding plan will be sufficient.
+
+    Stage 2:
+        Using the same gridding strategy as Stage 1, export a timeseries variable to NetCDF.
+        --chunk-time defaults to 1, resulting in a 1-timestep temporal chunk.
+        --chunk-px (pixels) defaults to 128 and results in a 128x128 spatial chunk. It must not exceed the smaller grid dimension.
 """
 
 import json
@@ -30,46 +48,94 @@ import netCDF4
 import numpy as np
 import pyogrio
 import rasterio
+import shapely
+from pyproj import CRS
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
 from rasterio.transform import from_origin
 
 logger = logging.getLogger("converter")
 
-TURN_TOLERANCE_DEG = (
-    1e-4  # allowed deviation of a vertex turn from 0, 90 or 270 degrees
-)
-STEP_TOLERANCE = 0.01  # allowed edge/vertex misfit, as a fraction of the step
-MAX_SHORTER_FRACTION = (
-    0.01  # outline edges allowed to be shorter than the most common length
-)
+# Misc
 RANDOM_SEED = 0
-BLOCK_SIZE = 512
-OVERVIEW_FACTORS = [2, 4, 8, 16]
+### For getting the verbatim CRS WKT from the discretization layer
 CRS_WKT_SQL = (
     "SELECT srtext FROM spatial_ref_sys WHERE srid ="
     " (SELECT srid FROM geometry_columns WHERE f_table_name = 'discretization')"
 )
+### Unit conversions (values and names)
+INCH_TO_MM = 25.4
+UNIT_CONVERSIONS_TO_MM = {"IN": INCH_TO_MM, "MM": 1.0}
+HMS_SOURCE_UNIT_NAMES = {"IN": "in", "MM": "mm"}
+
+# NetCDF settings
+### Overridable defaults
+DEFAULT_CHUNK_TIME = 1
+DEFAULT_CHUNK_PX = 128
+### Hard-coded
+COMPRESSION_LEVEL = 6
 TIME_CALENDAR = "proleptic_gregorian"
 TIME_UNITS = "hours since 1970-01-01"
-COMPRESSION_LEVEL = 6
-INCH_TO_MM = 25.4
-HMS_SOURCE_UNIT_NAMES = {"IN": "in", "MM": "mm"}
-UNIT_CONVERSIONS_TO_MM = {"IN": INCH_TO_MM, "MM": 1.0}
+NETCDF_AXIS_UNIT_INFO = {
+    "meter": ("m", 1.0),
+    "metre": ("m", 1.0),
+    "foot": ("ft", 0.3048),
+    "US survey foot": ("US_survey_foot", 1200 / 3937),
+}
+
+# NOTE:
+#   The sentinel OUT_UNITS_RETAIN_FROM_SOURCE preserves source units (IN -> in, MM -> mm), it indicates that unit conversion should not occur.
+#   If anything other than OUT_UNITS_RETAIN_FROM_SOURCE is provided, it should be a member of UNIT_CONVERSIONS_TO_MM.keys() and the appropriate conversions will then be applied.
+OUT_UNITS_RETAIN_FROM_SOURCE = "retain_from_source"
+
+# TODO:
+#   This is the list of allowed HMS result variables that can be exported with this tool.
+#   This should be exposed to the user so they can specify which variables to export, output units, and details of the relevant NetCDF metadata.
 HMS_RESULTS_VAR_METADATA = {
     "Incremental Excess": {
-        "name": "PRECIPITATION",
+        "name": "PRECIPITATION_EXCESS_INC",
         "description": "HEC-HMS results: excess precipitation (incremental)",
         "standard_name": "lwe_thickness_of_precipitation_amount",
         "cell_methods": "time: sum",
-        "output_units": "get_from_source",
-    }
+        "output_units": OUT_UNITS_RETAIN_FROM_SOURCE,
+    },
 }
+
+# Grid inference parameters
+### Allowed deviation of a vertex turn from 0, 90 or 270 degrees
+TURN_TOLERANCE_DEG = 1e-4
+### Allowed edge/vertex misfit, as a fraction of the step
+STEP_TOLERANCE = 0.01
+### Outline edges allowed to be shorter than the most common length
+MAX_SHORTER_FRACTION = 0.01
+### For scalability
+EDGE_ANALYSIS_BATCH_SIZE = 4096
+
+# Processing Details
+PROCESSING_BLOCK_SIZE = 512
+### For (Stage 1) review tif
+OVERVIEW_FACTORS = [2, 4, 8, 16]
+
+
+class GridInferenceError(Exception):
+    """Grid inference failed before a raster lattice could be determined."""
+
+
+def _netcdf_axis_unit(crs: CRS) -> str:
+    axis = crs.axis_info[0]
+    try:
+        netcdf_unit, expected_factor = NETCDF_AXIS_UNIT_INFO[axis.unit_name]
+    except KeyError:
+        raise ValueError(f"Unsupported CRS axis unit {axis.unit_name!r}") from None
+    if not math.isclose(axis.unit_conversion_factor, expected_factor, rel_tol=1e-12):
+        raise ValueError(
+            f"CRS axis unit {axis.unit_name!r} has conversion factor {axis.unit_conversion_factor} but expected: {expected_factor}"
+        )
+    return netcdf_unit
 
 
 def infer_grid_params(hms_disc_file: str, layer_name: str) -> dict:
-    """Infer the grid strategy that produced the stair-stepped discretization polygons,
-    e.g. SHG x delin resolution.
+    """Only used with --infer-grid, not used with --match-raster. Infer the grid strategy that produced the stair-stepped discretization polygons, e.g. SHG x delin resolution.
 
     ``hms_disc_file``: An HMS discretization file, e.g. a .sqlite (GDAL path, /vsi* ok).
     ``layer_name``: Subbasin outline layer, typically "subbasin2d".
@@ -80,14 +146,17 @@ def infer_grid_params(hms_disc_file: str, layer_name: str) -> dict:
             for ring in [part.exterior, *part.interiors]:
                 xy = list(ring.coords)  # closed: last point == first
                 headings = []
+                # Pair consecutive coordinates, excluding the repeated closing point.
                 for (x1, y1), (x2, y2) in zip(xy[:-1], xy[1:]):
                     if (x1, y1) == (x2, y2):
                         continue  # degenerate: repeated vertex
                     lengths.append(math.hypot(x2 - x1, y2 - y1))
                     headings.append(math.degrees(math.atan2(y2 - y1, x2 - x1)))
+                # Include the turn from the final edge back to the first edge.
                 turns += [
                     (b - a) % 360 for a, b in zip(headings, headings[1:] + headings[:1])
                 ]
+                # Exclude the repeated closing coordinate from the vertex list.
                 vertices += xy[:-1]
     lengths, turns, vertices = np.array(lengths), np.array(turns), np.array(vertices)
 
@@ -136,12 +205,22 @@ def infer_grid_params(hms_disc_file: str, layer_name: str) -> dict:
 class HMSResultsDelinGrid:
     __doc__ = __doc__
 
-    def __init__(self, hms_results_file: Path | str, hms_disc_file: str):
+    def __init__(
+        self,
+        hms_results_file: Path | str,
+        hms_disc_file: str,
+        match_raster: Path | str | None = None,
+        chunk_time: int = DEFAULT_CHUNK_TIME,
+        chunk_px: int = DEFAULT_CHUNK_PX,
+    ):
         """``hms_disc_file`` is a GDAL path, so /vsis3/, /vsicurl/ etc. work."""
         self.hms_results_file, self.hms_disc_file = (
             Path(hms_results_file),
             hms_disc_file,
         )
+        self.match_raster = match_raster
+        self.chunk_time = chunk_time
+        self.chunk_px = chunk_px
         if not self.hms_disc_file.endswith(".sqlite"):
             raise ValueError(
                 f"Expected a .sqlite HMS discretization file, got {self.hms_disc_file}"
@@ -173,9 +252,13 @@ class HMSResultsDelinGrid:
         """
         output_dir = Path(output_dir)
         stem = f"hms_h5_{self.hms_results_file.stem}_delin"
+        if self.match_raster is None:
+            stem += "_inferred"
+        else:
+            stem += f"_direct_{Path(self.match_raster).name}"
         outputs = tif, slivers_fgb, points_fgb, report_json = [
             output_dir / f"{stem}_{s}"
-            for s in ("grid.tif", "slivers.fgb", "sliver_points.fgb", "report.json")
+            for s in ("grid.tif", "slivers.fgb", "slivers_points.fgb", "report.json")
         ]
         for path in outputs:
             logger.info(f"Deleting if exists: {path}")
@@ -185,16 +268,20 @@ class HMSResultsDelinGrid:
         sections = {}
         try:
             grid_params, cell = self.grid()
-            # Count pixels per cell ID. Ignore background ID 0 so counts align
-            # with self.cells.
-            # Zero counts mark cells with no rasterized pixels (slivers).
-            sliver = np.bincount(cell.ravel(), minlength=len(self.cells) + 1)[1:] == 0
+            # Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
+            counts = np.zeros(len(self.cells) + 1, dtype="int64")
+            for start in range(0, cell.shape[0], PROCESSING_BLOCK_SIZE):
+                block = cell[start : start + PROCESSING_BLOCK_SIZE]
+                counts += np.bincount(block.ravel(), minlength=len(counts))
+            # Slivers are identified as zero-counts (cells with no rasterized pixels).
+            sliver = counts[1:] == 0
             sections = {
                 "grid_params": grid_params,
                 "grid": {
                     "w": cell.shape[1],
                     "h": cell.shape[0],
-                    "pixels_in_domain": int((cell > 0).sum()),
+                    # Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
+                    "pixels_in_domain": int(counts[1:].sum()),
                 },
                 "slivers": {
                     "count": int(sliver.sum()),
@@ -206,7 +293,10 @@ class HMSResultsDelinGrid:
             self._s1_write_grid(tif, grid_params, cell)
             self._s1_write_slivers(slivers_fgb, points_fgb, sliver)
         except Exception as e:
-            self.problems.append(f"Grid: {e}")
+            problem = f"Grid: {e}"
+            if isinstance(e, GridInferenceError):
+                problem += " Consider avoiding grid inference and provide an explicit --match-raster instead."
+            self.problems.append(problem)
         report = self._s1_write_report(report_json, **sections)
 
         for w in self.warnings:
@@ -224,34 +314,51 @@ class HMSResultsDelinGrid:
 
     def stage_2(self, output_file: Path | str, variable: str) -> Path:
         """Using shared gridding strategy, export a timeseries variable to NetCDF."""
-        metadata = HMS_RESULTS_VAR_METADATA.get(variable)
-        if metadata is None:
-            raise ValueError(
-                f"Unsupported HMS results variable {variable!r}. available: {list(HMS_RESULTS_VAR_METADATA)}"
-            )
-        self.check_results(variable)
-        grid_params, cell = self.grid()
-        if min(cell.shape) < BLOCK_SIZE:
-            raise ValueError(
-                "Fixed (1, 512, 512) chunks require at least 512 rows and columns"
-            )
-
         output_file = Path(output_file)
         if output_file.resolve() in {
             self.hms_results_file.resolve(),
             Path(self.hms_disc_file).resolve(),
         }:
-            raise ValueError("Output must not overwrite an input file")
+            raise ValueError("Output must not overwrite an input file.")
+        if not isinstance(self.chunk_time, int) or self.chunk_time < 1:
+            raise ValueError(
+                f"Time chunk must be a positive integer but got {self.chunk_time}"
+            )
+        if not isinstance(self.chunk_px, int) or self.chunk_px < 1:
+            raise ValueError(
+                f"Spatial chunk must be a positive integer but got {self.chunk_px}"
+            )
+        metadata = HMS_RESULTS_VAR_METADATA.get(variable)
+        if metadata is None:
+            raise ValueError(
+                f"Unsupported HMS results variable {variable!r}. Choose from: {list(HMS_RESULTS_VAR_METADATA)}"
+            )
+
+        self.check_results(variable)
+
+        grid_params, cell = self.grid()
+        if self.chunk_px > min(cell.shape):
+            raise ValueError(
+                f"Spatial chunk must not exceed the grid dimensions: chunk_px={self.chunk_px} vs shape={cell.shape}"
+            )
+        chunk_bytes = self.chunk_time * self.chunk_px**2 * np.dtype("float32").itemsize
+        if chunk_bytes >= 2**32:
+            raise ValueError("NetCDF chunk must be smaller than 4 GiB")
+
         temporary_path = None
         try:
             with h5py.File(self.hms_results_file, "r") as source:
                 datasets, time_values, time_units, calendar, units = (
                     self._s2_read_results(source, variable)
                 )
+                if self.chunk_time > len(time_values):
+                    raise ValueError(
+                        "Time chunk must not exceed the number of timesteps"
+                    )
                 try:
                     source_units = units.upper()
                     output_units = metadata["output_units"]
-                    if output_units == "get_from_source":
+                    if output_units == OUT_UNITS_RETAIN_FROM_SOURCE:
                         output_units = HMS_SOURCE_UNIT_NAMES[source_units]
                         unit_conversion = 1.0
                     else:
@@ -281,37 +388,24 @@ class HMSResultsDelinGrid:
                     data = self._s2_create_variable(target, metadata, output_units)
                     output_name = data.name
                     h, w = cell.shape
-                    values = np.full(
-                        len(self.cells) + 1, data._FillValue, dtype="float32"
-                    )
                     steps = len(time_values)
                     logger.info(
                         f"Writing {output_file!r}: {steps} timesteps, {w} x {h} pixels."
                     )
                     logger.info(f"Chunks: (time, y, x)={tuple(data.chunking())}")
-                    logger.info(f"Filters: {data.filters()} Block size: {BLOCK_SIZE}")
+                    logger.info(f"Filters: {data.filters()}")
+                    # Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
+                    values = np.empty(len(self.cells) + 1, dtype="float32")
                     for timestep in range(steps):
-                        if (
-                            (timestep + 1) % 5 == 0
-                            or timestep == 0
-                            or timestep == steps - 1
-                        ):
-                            logger.info(
-                                f"Writing NetCDF timestep {timestep + 1}/{steps}"
-                            )
-                        for dataset, indices, missing in datasets:
-                            row = dataset[timestep, :]
-                            valid = np.isfinite(row) & (row != missing)
-                            row_values = np.full(
-                                row.shape, data._FillValue, dtype="float32"
-                            )
-                            row_values[valid] = row[valid] * unit_conversion
-                            values[indices + 1] = row_values
-                        for start in range(0, h, BLOCK_SIZE):
-                            block = cell[start : start + BLOCK_SIZE]
-                            data[timestep, start : start + BLOCK_SIZE, :] = values[
-                                block
-                            ]
+                        self._s2_populate_timestep_values(
+                            timestep,
+                            steps,
+                            datasets,
+                            values,
+                            data._FillValue,
+                            unit_conversion,
+                        )
+                        data[timestep, :, :] = values[cell]
                     logger.info("Finalizing NetCDF file")
             assert temporary_path is not None
             temporary_path.chmod(0o644)
@@ -326,32 +420,166 @@ class HMSResultsDelinGrid:
         return output_file
 
     def grid(self) -> tuple[dict, np.ndarray]:
-        """Return inferred grid parameters and a int32 Boolean mask of it."""
-        grid_params = infer_grid_params(self.hms_disc_file, "subbasin2d")
-        step, x0, y0 = grid_params["step"], grid_params["x0"], grid_params["y0"]
+        """Return grid parameters and polygon lookup IDs (0 is outside the domain)."""
+        if len(self.cells) > np.iinfo("uint32").max:
+            raise ValueError("Polygon count exceeds uint32 lookup capacity")
+        cell_dtype = "uint16" if len(self.cells) <= np.iinfo("uint16").max else "uint32"
         xmin, ymin, xmax, ymax = self.cells.total_bounds
-        col0, col1 = np.floor((xmin - x0) / step), np.ceil((xmax - x0) / step)
-        row0, row1 = np.floor((ymin - y0) / step), np.ceil((ymax - y0) / step)
-        left, top = float(x0 + col0 * step), float(y0 + row1 * step)
-        cell = rasterize(
-            zip(self.cells.geometry, range(1, len(self.cells) + 1)),
-            out_shape=(int(row1 - row0), int(col1 - col0)),
-            transform=from_origin(left, top, step, step),
-            fill=0,
-            dtype="int32",
+
+        if self.match_raster is not None:
+            logger.info(f"Applying match_raster: {self.match_raster!r}")
+            with rasterio.open(self.match_raster) as snap:
+                if snap.crs is None:
+                    raise ValueError("Match raster has no CRS")
+                if not CRS.from_wkt(snap.crs.to_wkt()).equals(self.cells.crs):
+                    raise ValueError("Match raster CRS must equal discretization CRS")
+                transform = snap.transform
+                if (
+                    transform.b != 0  # rotation
+                    or transform.d != 0  # rotation
+                    or transform.a <= 0  # x-resolution
+                    or transform.e >= 0  # y-resolution (negative for north-up)
+                ):
+                    raise ValueError(
+                        f"Match raster must be north-up with no rotation, but got transform: {transform}"
+                    )
+
+            # Apply transform of provided match grid to minimally cover discretizatio polygons
+            col0, row0 = ~transform * (xmin, ymax)
+            col1, row1 = ~transform * (xmax, ymin)
+            col0, row0 = math.floor(col0), math.floor(row0)
+            col1, row1 = math.ceil(col1), math.ceil(row1)
+            transform *= rasterio.Affine.translation(col0, row0)
+            shape = (row1 - row0, col1 - col0)
+            grid_params = {"grid_source": "direct"}
+
+        else:
+            logger.info("No match_raster provided. Inferring grid parameters.")
+            try:
+                grid_params = infer_grid_params(self.hms_disc_file, "subbasin2d")
+            except Exception as error:
+                raise GridInferenceError(str(error)) from error
+            grid_params["grid_source"] = "inferred"
+
+            # Snap polygon bounds outward to whole cells of the inferred grid.
+            # Apply transform of inferred grid to minimally cover discretizatio polygons
+            step, x0, y0 = grid_params["step"], grid_params["x0"], grid_params["y0"]
+            col0, col1 = np.floor((xmin - x0) / step), np.ceil((xmax - x0) / step)
+            row0, row1 = np.floor((ymin - y0) / step), np.ceil((ymax - y0) / step)
+            left, top = float(x0 + col0 * step), float(y0 + row1 * step)
+            transform = from_origin(left, top, step, step)
+            shape = (int(row1 - row0), int(col1 - col0))
+
+        # Ensure dimensions are positive and the lookup array fits addressable memory.
+        cell_bytes = np.dtype(cell_dtype).itemsize
+        if min(shape) <= 0 or shape[0] * shape[1] > np.iinfo(np.intp).max // cell_bytes:
+            raise ValueError("Grid dimensions exceed addressable array size")
+        raster_buffer_bytes = PROCESSING_BLOCK_SIZE * shape[1] * cell_bytes
+        with rasterio.Env(GDAL_CACHEMAX=raster_buffer_bytes):
+            cell = rasterize(
+                # Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
+                zip(self.cells.geometry, range(1, len(self.cells) + 1)),
+                out_shape=shape,
+                transform=transform,
+                fill=0,
+                dtype=cell_dtype,
+            )
+
+        self._fill_edge_cells(cell, transform)
+
+        grid_params["match_raster"] = (
+            str(self.match_raster) if self.match_raster is not None else None
         )
-        grid_params["geotransform"] = [left, step, 0.0, top, 0.0, -step]
+        grid_params["geotransform"] = list(transform.to_gdal())
         crs = self.cells.crs
         unit = crs.axis_info[0].unit_name
-        step_m = step * crs.axis_info[0].unit_conversion_factor
         # edges = grid_params["edges"]
         # one_pixel = grid_params["one_step_fraction"]
         # vertex_error = grid_params["max_vertex_misfit"]
         logger.info(f"Grid Unit: {unit!r}, Grid CRS: {crs.name!r}")
         logger.info(
-            f"Inferred Grid Resolution, Shape, Origin: ~{step:.6f} {unit!r} (~{step_m:.4f} m), ({cell.shape[1]}, {cell.shape[0]}), Origin: ~({left:.4f}, {top:.4f})"
+            f"Grid ({grid_params['grid_source']}): {cell.shape[1]} x {cell.shape[0]} pixels, resolution ({transform.a:.6f}, {-transform.e:.6f}) {unit}, origin ({transform.c:.4f}, {transform.f:.4f})"
         )
         return grid_params, cell
+
+    def _fill_edge_cells(self, cell: np.ndarray, transform: rasterio.Affine) -> None:
+        """NOTE: updates ``cell`` in-place. Fill center-miss pixels with the largest-overlap polygon's 1-based ID.
+
+        Process EDGE_ANALYSIS_BATCH_SIZE pixels at a time to limit intersection memory.
+        Ignore zero-area contacts and break equal-area ties by feature order.
+        """
+        # Mark every pixel touched by a polygon, **even those whose center does not land in one**
+        touched = rasterize(
+            ((geometry, 1) for geometry in self.cells.geometry),
+            out_shape=cell.shape,
+            transform=transform,
+            all_touched=True,
+            dtype="uint8",
+        )
+        # Collect pixels whose centers miss, in row blocks to limit memory footprint.
+        row_parts, col_parts = [], []
+        for start in range(0, cell.shape[0], PROCESSING_BLOCK_SIZE):
+            block = cell[start : start + PROCESSING_BLOCK_SIZE]
+            touched_block = touched[start : start + PROCESSING_BLOCK_SIZE]
+            rows, cols = np.nonzero((block == 0) & (touched_block != 0))
+            if rows.size:
+                row_parts.append(rows + start)
+                col_parts.append(cols)
+
+        # If none of the center-missing pixels need special treatment (none of them touch the polygons at all), then return early.
+        if not row_parts:
+            return
+
+        # Handle pixels that touch polygons but whose centers do not.
+
+        # Merge candidate coordinates.
+        edge_rows = np.concatenate(row_parts)
+        edge_cols = np.concatenate(col_parts)
+        del touched, touched_block, row_parts, col_parts
+        count_filled = 0
+        geometries = self.cells.geometry.array
+        spatial_index = self.cells.sindex
+
+        # Resolve candidate pixels in bounded batches using exact polygon overlap.
+        for start in range(0, len(edge_rows), EDGE_ANALYSIS_BATCH_SIZE):
+            # Select the candidate pixel rows and columns for this batch.
+            batch_rows = edge_rows[start : start + EDGE_ANALYSIS_BATCH_SIZE]
+            batch_cols = edge_cols[start : start + EDGE_ANALYSIS_BATCH_SIZE]
+            # Convert each candidate's row and column to its upper-left corner.
+            left = transform.c + batch_cols * transform.a
+            top = transform.f + batch_rows * transform.e
+            # Build one polygon for each candidate pixel.
+            pixels = shapely.box(left, top + transform.e, left + transform.a, top)
+
+            # Each pair identifies a batch pixel and an intersecting polygon.
+            pixel_indices, polygon_indices = spatial_index.query(
+                pixels, predicate="intersects"
+            )
+            # Measure each candidate pixel's positive-area intersection with polygons.
+            overlap_areas = shapely.area(
+                shapely.intersection(pixels[pixel_indices], geometries[polygon_indices])
+            )
+            has_area = overlap_areas > 0
+            pixel_indices = pixel_indices[has_area]
+            polygon_indices = polygon_indices[has_area]
+            overlap_areas = overlap_areas[has_area]
+
+            # Sort by descending overlap area, then tie-break with polygon feature ID.
+            ranked_pairs = np.lexsort((polygon_indices, -overlap_areas, pixel_indices))
+            ranked_pixels = pixel_indices[ranked_pairs]
+
+            # Keep each pixel's first ranked overlap (prioritized by area-of-overlap, then tie-break (for determinism) with arbitrary index.
+            filled_pixels, first_pair = np.unique(ranked_pixels, return_index=True)
+            # Map each winning overlap back to its polygon index.
+            winning_polygons = polygon_indices[ranked_pairs[first_pair]]
+            # Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
+            cell[batch_rows[filled_pixels], batch_cols[filled_pixels]] = (
+                winning_polygons + 1
+            )
+            count_filled += len(filled_pixels)
+        logger.info(
+            f"Filled {count_filled} pixels whose centers did not intersect any polygon."
+        )
 
     def check_results(self, variable: str) -> None:
         """Raise if any expected result's per-subbasin cell counts differ."""
@@ -376,8 +604,7 @@ class HMSResultsDelinGrid:
             }
             if wrong:
                 raise ValueError(
-                    f"{len(wrong)} subbasins differ in (results, discretization) "
-                    f"cell count for {variable!r}: {dict(list(wrong.items())[:5])}"
+                    f"{len(wrong)} subbasins differ in (results, discretization) cell count for {variable!r}: {dict(list(wrong.items())[:5])}"
                 )
         logger.info(
             f"Results match discretization: {len(disc)} subbasins, {len(self.cells)} cells"
@@ -385,6 +612,7 @@ class HMSResultsDelinGrid:
 
     def _s1_write_grid(self, path: Path, grid_params: dict, cell: np.ndarray) -> None:
         """Write rasterized discretization with randomization for visual review."""
+        # Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
         values = np.random.default_rng(RANDOM_SEED).integers(
             1, 256, size=len(self.cells) + 1, dtype=np.uint8
         )
@@ -393,9 +621,12 @@ class HMSResultsDelinGrid:
         with rasterio.open(
             path, "w", driver="GTiff", width=w, height=h, count=1, dtype="uint8", nodata=0,
             crs=self.crs_wkt, transform=rasterio.Affine.from_gdal(*grid_params["geotransform"]),
-            tiled=True, blockxsize=BLOCK_SIZE, blockysize=BLOCK_SIZE, compress="zstd",
+            tiled=True, blockxsize=PROCESSING_BLOCK_SIZE, blockysize=PROCESSING_BLOCK_SIZE, compress="zstd",
         ) as dst:  # fmt: skip
-            dst.write(values[cell], 1)
+            for start in range(0, h, PROCESSING_BLOCK_SIZE):
+                block = cell[start : start + PROCESSING_BLOCK_SIZE]
+                window = rasterio.windows.Window(0, start, w, block.shape[0])
+                dst.write(values[block], 1, window=window)
             dst.build_overviews(OVERVIEW_FACTORS, Resampling.nearest)
 
     def _s1_write_slivers(
@@ -403,6 +634,7 @@ class HMSResultsDelinGrid:
     ) -> None:
         """Write two FlatGeobufs for review: sliver polygons and a point within each."""
         slivers = self.cells[sliver].rename_axis("ogc_fid").reset_index()
+        # Convert zero-based positions to 1-based grid cell IDs.
         slivers.insert(0, "cell", np.flatnonzero(sliver) + 1)
         slivers["area"] = slivers.area
         slivers.to_file(polygons_path, driver="FlatGeobuf")
@@ -427,9 +659,10 @@ class HMSResultsDelinGrid:
         return report
 
     def _s2_read_results(self, source: h5py.File, variable: str) -> tuple:
-        """Read the HMS time axis, units, and datasets in discretization order."""
+        """Validate and align results without mutating exporter state."""
 
         def attr(dataset, name, default=""):
+            """Return the first attribute value as text, or the text default."""
             value = np.asarray(dataset.attrs.get(name, default)).reshape(-1)[0]
             return value.decode() if isinstance(value, bytes) else str(value)
 
@@ -440,7 +673,6 @@ class HMSResultsDelinGrid:
         time_values = times[:].reshape(-1)
         time_units = attr(times, "units")
         calendar = attr(times, "calendar", "standard").lower()
-        netCDF4.num2date(time_values, time_units, calendar)
         units = attr(first_dataset, "units")
         datasets = []
         for subbasin, indices in subbasins.items():
@@ -466,7 +698,14 @@ class HMSResultsDelinGrid:
         time_units: str,
         calendar: str,
     ) -> None:
-        """Write the HMS time axis and the discretization grid's coordinates and CRS."""
+        """Write explicit CF-1.9 time, coordinate, and grid-mapping metadata.
+
+        Direct netCDF4 writes preserve the grid's exact pixel centers and CRS WKT.
+        Alternative writers like xarray or GDAL still require explicit encoding
+        and CF/GDAL attributes to preserve chunking and georeferencing details.
+        https://cfconventions.org
+        https://gdal.org/en/stable/drivers/raster/netcdf.html
+        """
         target.Conventions = "CF-1.9"
         h, w = shape
         for name, size in (("time", len(time_values)), ("y", h), ("x", w)):
@@ -488,6 +727,7 @@ class HMSResultsDelinGrid:
             intervals = np.diff(epoch_hours)
             if np.any(intervals <= 0):
                 raise ValueError("HMS result times must be strictly increasing")
+            # Pair each end with the prior time. Extrapolate the first start.
             starts = np.concatenate(([epoch_hours[0] - intervals[0]], epoch_hours[:-1]))
             target.createDimension("nv", 2)
             time.bounds = "time_bnds"
@@ -500,16 +740,13 @@ class HMSResultsDelinGrid:
                 }
             )
             time_bounds[:] = np.column_stack((starts, epoch_hours))
-        left, step, _, top, _, _ = grid_params["geotransform"]
-        axis_units = {
-            "meter": "m",
-            "metre": "m",
-            "foot": "ft",
-            "US survey foot": "US_survey_foot",
-        }[self.cells.crs.axis_info[0].unit_name]
+        left, x_step, _, top, _, y_step = grid_params["geotransform"]
+        axis_units = _netcdf_axis_unit(self.cells.crs)
+
+        # Coordinates are pixel centers derived directly from the grid transform.
         for name, coordinates in (
-            ("x", left + (np.arange(w) + 0.5) * step),
-            ("y", top - (np.arange(h) + 0.5) * step),
+            ("x", left + (np.arange(w) + 0.5) * x_step),
+            ("y", top + (np.arange(h) + 0.5) * y_step),
         ):
             coordinate = target.createVariable(name, "float64", (name,))
             coordinate.standard_name = f"projection_{name}_coordinate"
@@ -518,7 +755,8 @@ class HMSResultsDelinGrid:
             coordinate.axis = name.upper()
             coordinate[:] = coordinates
         crs = target.createVariable("crs", "int32")
-        crs.setncatts(self.cells.crs.to_cf())
+        crs.setncatts(CRS.from_wkt(self.crs_wkt).to_cf())
+        crs.crs_wkt = self.crs_wkt
         crs.spatial_ref = self.crs_wkt
         crs.GeoTransform = " ".join(map(str, grid_params["geotransform"]))
 
@@ -533,7 +771,7 @@ class HMSResultsDelinGrid:
             fill_value=netCDF4.default_fillvals["f4"],
             zlib=True,
             complevel=COMPRESSION_LEVEL,
-            chunksizes=(1, BLOCK_SIZE, BLOCK_SIZE),
+            chunksizes=(self.chunk_time, self.chunk_px, self.chunk_px),
         )
         data.long_name = metadata["name"]
         data.units = output_units
@@ -542,3 +780,38 @@ class HMSResultsDelinGrid:
         data.cell_methods = metadata["cell_methods"]
         data.grid_mapping = "crs"
         return data
+
+    def _s2_populate_timestep_values(
+        self,
+        timestep: int,
+        steps: int,
+        datasets: list[tuple[h5py.Dataset, np.ndarray, float]],
+        values: np.ndarray,
+        fill_value: float,
+        unit_conversion: float,
+    ) -> None:
+        """NOTE: updates ``cell`` in-place. Map one timestep's valid results into the reusable cell-value buffer."""
+        if (timestep + 1) % 5 == 0 or timestep == 0 or timestep == steps - 1:
+            logger.info(f"Writing NetCDF timestep {timestep + 1}/{steps}")
+        values.fill(fill_value)
+        for dataset, indices, missing in datasets:
+            row = dataset[timestep, :]
+            valid = np.isfinite(row)
+            # Exclude HMS missing-value sentinels from the finite values.
+            valid &= row != missing
+            # Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
+            valid_indices = indices[valid] + 1
+
+            ### If unit conversion requires float64 precision
+            # row_values = np.full(row.shape, fill_value, dtype="float32")
+            # with np.errstate(over="raise", invalid="raise"):
+            #     converted = row[valid].astype("float64") * unit_conversion
+            # if np.any(np.abs(converted) > np.finfo("float32").max):
+            #     raise ValueError("HMS result values exceed float32 range")
+            # row_values[valid] = converted
+
+            if unit_conversion != 1:
+                with np.errstate(over="raise", invalid="raise"):
+                    values[valid_indices] = row[valid] * unit_conversion
+            else:
+                values[valid_indices] = row[valid]

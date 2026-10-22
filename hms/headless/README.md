@@ -57,10 +57,25 @@ docker build --build-arg HMS_VERSION=4.14-beta.1 -t hmsbox-headless:4.14-beta.1 
 ```
 
 The build process:
-1. Compiles the Java HMS runner application using reflection-based API detection
+1. Compiles the Java HMS runner application
 2. Downloads HEC-HMS binaries and dependencies for the specified version (excludes samples/docs)
 3. Creates a minimal production image with all required libraries and non-root user execution
 4. Single `RunHMS` class supports all versions through runtime API detection
+
+## HMS Version 4.14 Units Strictness
+
+HEC-HMS 4.14.0 (full release) is strict on units of input NetCDF precipitation data. They must use units of 'mm' instead of the common equivalent 'kg m-2'.
+
+This does not affect the Beta releases of 4.14, but rather the 4.14.0 full release.
+
+To update the data units label of an existing NetCDF file in-place, run this:
+
+```sh
+# WARNING: This does not perform a conversion, it just relabels the units metadata.
+ncatted -O -a units,<VAR_NAME>,o,c,<NEW_UNITS_LABEL> <PATH_TO_NETCDF_FILE>
+# E.g.
+ncatted -O -a units,'qpf_1hr',o,c,'mm' 'model/forcing/hrrr_qpf.nc'
+```
 
 ## Logging
 

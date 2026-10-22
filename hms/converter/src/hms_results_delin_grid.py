@@ -1,12 +1,14 @@
-"""Export HMS results to timeseries NetCDF grid.
+"""Export HMS results to timeseries NetCDF or HEC-DSS grid.
 
 This tool has two stages.
 Stage 1 is optional and writes review layers.
-Stage 2 writes the NetCDF, and does not read the Stage 1 outputs, but does leverage many of the same algorithms as Stage 1.
+Stage 2 writes a .nc or .dss file, and does not read the Stage 1 outputs, but does leverage many of the same algorithms as Stage 1.
 
 Must use either --match-raster <path>, or --infer-raster, not both.
 
 With --match-raster, use an existing raster to define the output grid's resolution and alignment. The output grid is sized to minimally cover the discretization polygons, while preserving pixel snapping. CRS must be equivalent to that of the discretization polygons. Filepath or GDAL /vsi*/ path.
+
+With --squarify SIZE and --match-raster, sample the polygons directly onto a square grid of the given resolution in CRS units. The original matched grid's lower-left corner and CRS are retained. Grid dimensions are adjusted to cover the original extent, extending its top and right edges by less than one square pixel if necessary.
 
 With --infer-raster, infer grid alignment and resolution from the discretization polygons' staircase pattern (commonly SHG x Subbasins).
 
@@ -30,7 +32,9 @@ Stages details:
         Stage 1 may be skipped if confident that the gridding plan will be sufficient.
 
     Stage 2:
-        Using the same gridding strategy as Stage 1, export a timeseries variable to NetCDF.
+        Using the same gridding strategy as Stage 1, export a timeseries variable to NetCDF or HEC-DSS.
+        DSS requires square pixels. Pathname parts C (variable), D (interval start), and E (interval end) are populated, with A/B/F remaining empty.
+        Chunk settings apply only to NetCDF.
         --chunk-time defaults to 1, resulting in a 1-timestep temporal chunk.
         --chunk-px (pixels) defaults to 128 and results in a 128x128 spatial chunk. It must not exceed the smaller grid dimension.
 """
@@ -39,7 +43,7 @@ import json
 import logging
 import math
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import geopandas as gpd
@@ -55,6 +59,7 @@ from rasterio.features import rasterize
 from rasterio.transform import from_origin
 
 logger = logging.getLogger("converter")
+SQUARIFY_WARNING = "--squarify samples polygons on a square grid at the requested resolution. The original lower-left corner is preserved, but grid dimensions and sampling locations change. Nearest sampling (of the raw polygon values) is used at the final pixel centers. Bilinear sampling is not used."
 
 # Misc
 RANDOM_SEED = 0
@@ -212,6 +217,7 @@ class HMSResultsDelinGrid:
         match_raster: Path | str | None = None,
         chunk_time: int = DEFAULT_CHUNK_TIME,
         chunk_px: int = DEFAULT_CHUNK_PX,
+        squarify: float | None = None,
     ):
         """``hms_disc_file`` is a GDAL path, so /vsis3/, /vsicurl/ etc. work."""
         self.hms_results_file, self.hms_disc_file = (
@@ -221,6 +227,12 @@ class HMSResultsDelinGrid:
         self.match_raster = match_raster
         self.chunk_time = chunk_time
         self.chunk_px = chunk_px
+        self.squarify = squarify
+        if squarify is not None:
+            if match_raster is None:
+                raise ValueError("--squarify requires --match-raster")
+            if not math.isfinite(squarify) or squarify <= 0:
+                raise ValueError("--squarify must be a finite positive resolution")
         if not self.hms_disc_file.endswith(".sqlite"):
             raise ValueError(
                 f"Expected a .sqlite HMS discretization file, got {self.hms_disc_file}"
@@ -313,18 +325,21 @@ class HMSResultsDelinGrid:
         return report
 
     def stage_2(self, output_file: Path | str, variable: str) -> Path:
-        """Using shared gridding strategy, export a timeseries variable to NetCDF."""
+        """Using shared gridding strategy, export a timeseries variable to .nc or .dss."""
         output_file = Path(output_file)
+        if output_file.suffix.lower() not in {".nc", ".dss"}:
+            raise ValueError("Stage 2 output must have a .nc or .dss extension")
+        is_netcdf = output_file.suffix.lower() == ".nc"
         if output_file.resolve() in {
             self.hms_results_file.resolve(),
             Path(self.hms_disc_file).resolve(),
         }:
             raise ValueError("Output must not overwrite an input file.")
-        if not isinstance(self.chunk_time, int) or self.chunk_time < 1:
+        if is_netcdf and (not isinstance(self.chunk_time, int) or self.chunk_time < 1):
             raise ValueError(
                 f"Time chunk must be a positive integer but got {self.chunk_time}"
             )
-        if not isinstance(self.chunk_px, int) or self.chunk_px < 1:
+        if is_netcdf and (not isinstance(self.chunk_px, int) or self.chunk_px < 1):
             raise ValueError(
                 f"Spatial chunk must be a positive integer but got {self.chunk_px}"
             )
@@ -337,86 +352,52 @@ class HMSResultsDelinGrid:
         self.check_results(variable)
 
         grid_params, cell = self.grid()
-        if self.chunk_px > min(cell.shape):
+        if is_netcdf and self.chunk_px > min(cell.shape):
             raise ValueError(
                 f"Spatial chunk must not exceed the grid dimensions: chunk_px={self.chunk_px} vs shape={cell.shape}"
             )
-        chunk_bytes = self.chunk_time * self.chunk_px**2 * np.dtype("float32").itemsize
-        if chunk_bytes >= 2**32:
-            raise ValueError("NetCDF chunk must be smaller than 4 GiB")
+        if is_netcdf:
+            chunk_bytes = (
+                self.chunk_time * self.chunk_px**2 * np.dtype("float32").itemsize
+            )
+            if chunk_bytes >= 2**32:
+                raise ValueError("NetCDF chunk must be smaller than 4 GiB")
 
-        temporary_path = None
-        try:
-            with h5py.File(self.hms_results_file, "r") as source:
-                datasets, time_values, time_units, calendar, units = (
-                    self._s2_read_results(source, variable)
-                )
-                if self.chunk_time > len(time_values):
-                    raise ValueError(
-                        "Time chunk must not exceed the number of timesteps"
-                    )
-                try:
-                    source_units = units.upper()
-                    output_units = metadata["output_units"]
-                    if output_units == OUT_UNITS_RETAIN_FROM_SOURCE:
-                        output_units = HMS_SOURCE_UNIT_NAMES[source_units]
-                        unit_conversion = 1.0
-                    else:
-                        unit_conversion = UNIT_CONVERSIONS_TO_MM[source_units]
-                except KeyError:
-                    raise ValueError(
-                        f"Unsupported units {units!r} for {variable!r}"
-                    ) from None
-                output_file.parent.mkdir(parents=True, exist_ok=True)
-                temporary_file = tempfile.NamedTemporaryFile(
-                    prefix=f".{output_file.name}.",
-                    suffix=".tmp",
-                    dir=output_file.parent,
-                    delete=False,
-                )
-                temporary_path = Path(temporary_file.name)
-                temporary_file.close()
-                with netCDF4.Dataset(temporary_path, "w", format="NETCDF4") as target:
-                    self._s2_write_coordinates(
-                        target,
-                        grid_params,
-                        cell.shape,
-                        time_values,
-                        time_units,
-                        calendar,
-                    )
-                    data = self._s2_create_variable(target, metadata, output_units)
-                    output_name = data.name
-                    h, w = cell.shape
-                    steps = len(time_values)
-                    logger.info(
-                        f"Writing {output_file!r}: {steps} timesteps, {w} x {h} pixels."
-                    )
-                    logger.info(f"Chunks: (time, y, x)={tuple(data.chunking())}")
-                    logger.info(f"Filters: {data.filters()}")
-                    # Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
-                    values = np.empty(len(self.cells) + 1, dtype="float32")
-                    for timestep in range(steps):
-                        self._s2_populate_timestep_values(
-                            timestep,
-                            steps,
-                            datasets,
-                            values,
-                            data._FillValue,
-                            unit_conversion,
-                        )
-                        data[timestep, :, :] = values[cell]
-                    logger.info("Finalizing NetCDF file")
-            assert temporary_path is not None
-            temporary_path.chmod(0o644)
-            temporary_path.replace(output_file)
-        except Exception:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
-            raise
-        logger.info(
-            f"Wrote HMS results variable {variable!r} to {output_file!r} as {output_name!r}"
-        )
+        with h5py.File(self.hms_results_file, "r") as source:
+            datasets, time_values, time_units, calendar, units = self._s2_read_results(
+                source, variable
+            )
+            if is_netcdf and self.chunk_time > len(time_values):
+                raise ValueError("Time chunk must not exceed the number of timesteps")
+            try:
+                source_units = units.upper()
+                output_units = metadata["output_units"]
+                if output_units == OUT_UNITS_RETAIN_FROM_SOURCE:
+                    output_units = HMS_SOURCE_UNIT_NAMES[source_units]
+                    unit_conversion = 1.0
+                else:
+                    unit_conversion = UNIT_CONVERSIONS_TO_MM[source_units]
+            except KeyError:
+                raise ValueError(
+                    f"Unsupported units {units!r} for {variable!r}"
+                ) from None
+            writer = self._s2_write_netcdf if is_netcdf else self._s2_write_dss
+            writer(
+                output_file,
+                metadata,
+                grid_params,
+                cell,
+                datasets,
+                time_values,
+                time_units,
+                calendar,
+                output_units,
+                unit_conversion,
+            )
+        if is_netcdf:
+            logger.info(
+                f"Wrote HMS results variable {variable!r} to {output_file!r} as {metadata['name']!r}"
+            )
         return output_file
 
     def grid(self) -> tuple[dict, np.ndarray]:
@@ -443,7 +424,6 @@ class HMSResultsDelinGrid:
                     raise ValueError(
                         f"Match raster must be north-up with no rotation, but got transform: {transform}"
                     )
-
             # Apply transform of provided match grid to minimally cover discretizatio polygons
             col0, row0 = ~transform * (xmin, ymax)
             col1, row1 = ~transform * (xmax, ymin)
@@ -470,6 +450,18 @@ class HMSResultsDelinGrid:
             transform = from_origin(left, top, step, step)
             shape = (int(row1 - row0), int(col1 - col0))
 
+        if self.match_raster is not None and self.squarify is not None:
+            bottom = transform.f + shape[0] * transform.e
+            height = math.ceil(shape[0] * -transform.e / self.squarify)
+            width = math.ceil(shape[1] * transform.a / self.squarify)
+            transform = from_origin(
+                transform.c,
+                bottom + height * self.squarify,
+                self.squarify,
+                self.squarify,
+            )
+            shape = (height, width)
+
         # Ensure dimensions are positive and the lookup array fits addressable memory.
         cell_bytes = np.dtype(cell_dtype).itemsize
         if min(shape) <= 0 or shape[0] * shape[1] > np.iinfo(np.intp).max // cell_bytes:
@@ -487,6 +479,7 @@ class HMSResultsDelinGrid:
 
         self._fill_edge_cells(cell, transform)
 
+        grid_params["squarify"] = self.squarify
         grid_params["match_raster"] = (
             str(self.match_raster) if self.match_raster is not None else None
         )
@@ -689,6 +682,197 @@ class HMSResultsDelinGrid:
             datasets.append((dataset, indices, missing))
         return datasets, time_values, time_units, calendar, units
 
+    def _s2_write_netcdf(
+        self,
+        output_file: Path,
+        metadata: dict,
+        grid_params: dict,
+        cell: np.ndarray,
+        datasets: list[tuple[h5py.Dataset, np.ndarray, float]],
+        time_values: np.ndarray,
+        time_units: str,
+        calendar: str,
+        output_units: str,
+        unit_conversion: float,
+    ) -> Path:
+        """Write the NetCDF grid and atomically replace the destination on success."""
+        temporary_path = None
+        try:
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary_file = tempfile.NamedTemporaryFile(
+                prefix=f".{output_file.name}.",
+                suffix=".tmp",
+                dir=output_file.parent,
+                delete=False,
+            )
+            temporary_path = Path(temporary_file.name)
+            temporary_file.close()
+            with netCDF4.Dataset(temporary_path, "w", format="NETCDF4") as target:
+                self._s2_write_coordinates(
+                    target,
+                    grid_params,
+                    cell.shape,
+                    time_values,
+                    time_units,
+                    calendar,
+                )
+                data = self._s2_create_variable(target, metadata, output_units)
+                h, w = cell.shape
+                steps = len(time_values)
+                logger.info(
+                    f"Writing {output_file!r}: {steps} timesteps, {w} x {h} pixels."
+                )
+                logger.info(f"Chunks: (time, y, x)={tuple(data.chunking())}")
+                logger.info(f"Filters: {data.filters()}")
+                # Grid cell IDs are 1-based, with 0 reserved for pixels outside the domain.
+                values = np.empty(len(self.cells) + 1, dtype="float32")
+                for timestep in range(steps):
+                    self._s2_populate_timestep_values(
+                        timestep,
+                        steps,
+                        datasets,
+                        values,
+                        data._FillValue,
+                        unit_conversion,
+                    )
+                    data[timestep, :, :] = values[cell]
+                logger.info("Finalizing NetCDF file")
+            temporary_path.chmod(0o644)
+            temporary_path.replace(output_file)
+        except Exception:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            raise
+        return output_file
+
+    def _s2_write_dss(
+        self,
+        output_file: Path,
+        metadata: dict,
+        grid_params: dict,
+        cell: np.ndarray,
+        datasets: list[tuple[h5py.Dataset, np.ndarray, float]],
+        time_values: np.ndarray,
+        time_units: str,
+        calendar: str,
+        output_units: str,
+        unit_conversion: float,
+    ) -> Path:
+        """Write one interval grid per timestep without passing through NetCDF."""
+        from hecdss import HecDss
+        from hecdss.gridded_data import NULL_INT, GriddedData
+
+        left, x_step, x_rotation, top, y_rotation, y_step = grid_params["geotransform"]
+        if (
+            x_rotation != 0
+            or y_rotation != 0
+            or x_step <= 0
+            or not math.isclose(x_step, -y_step, rel_tol=1e-12)
+        ):
+            dx, dy = abs(x_step), abs(y_step)
+            average = (dx + dy) / 2
+            raise ValueError(
+                f"DSS output requires north-up square pixels, but dx={dx} and dy={dy}. Provide --match-raster with already-square pixels, or use --squarify SIZE_PX. Here are some sizes to consider (in CRS units): dx={dx}, dy={dy}, average={average}, rounded average={round(average)}."
+            )
+        dates = netCDF4.num2date(time_values, time_units, calendar)
+        seconds = netCDF4.date2num(dates, "seconds since 1970-01-01", TIME_CALENDAR)
+        if len(seconds) < 2:
+            raise ValueError(
+                "DSS interval grids require at least two timesteps to determine the first interval"
+            )
+        if np.any(np.diff(seconds) <= 0):
+            raise ValueError("HMS result times must be strictly increasing")
+        starts = np.concatenate(
+            ([seconds[0] - (seconds[1] - seconds[0])], seconds[:-1])
+        )
+        if np.any(seconds % 60 != 0) or np.any(starts % 60 != 0):
+            raise ValueError("DSS grid interval times must fall on whole minutes")
+        bounds = netCDF4.num2date(
+            np.column_stack((starts, seconds)),
+            "seconds since 1970-01-01",
+            TIME_CALENDAR,
+        )
+        height, width = cell.shape
+        bottom = top + height * y_step
+        lower_x = math.floor(left / x_step)
+        lower_y = math.floor(bottom / x_step)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{output_file.name}.",
+                suffix=".dss",
+                dir=output_file.parent,
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+            temporary_path.unlink()
+            with HecDss(str(temporary_path)) as target:
+                values = np.empty(len(self.cells) + 1, dtype="float32")
+                for timestep, (start, end) in enumerate(bounds):
+                    self._s2_populate_timestep_values(
+                        timestep,
+                        len(dates),
+                        datasets,
+                        values,
+                        np.nan,
+                        unit_conversion,
+                        output_format="DSS",
+                    )
+                    image = values[cell][::-1]
+                    has_data = np.isfinite(image).any()
+                    # Grid paths are literal, so encode midnight starts as 0000 and ends as the prior day's 2400.
+                    start_part = start.strftime("%d%b%Y:%H%M").upper()
+                    end_part = end.strftime("%d%b%Y:%H%M").upper()
+                    if end.hour == 0 and end.minute == 0:
+                        end_part = (
+                            (end - timedelta(days=1)).strftime("%d%b%Y:2400").upper()
+                        )
+                    record = GriddedData.create(
+                        path=f"///{metadata['name']}/{start_part}/{end_part}//",
+                        # Time-referenced specified grid with an explicit CRS, rather than a fixed SHG/HRAP grid.
+                        type=430,
+                        dataType=1,
+                        lowerLeftCellX=lower_x,
+                        lowerLeftCellY=lower_y,
+                        # WKT spatial reference definition.
+                        srsDefinitionType=0,
+                        srsName=self.cells.crs.name,
+                        srsDefinition=self.crs_wkt,
+                        cellSize=x_step,
+                        xCoordOfGridCellZero=left - lower_x * x_step,
+                        yCoordOfGridCellZero=bottom - lower_y * x_step,
+                        dataUnits=output_units.upper(),
+                        # Despite its name, this is the DSS float32 no-data sentinel (aka -FLT_MAX).
+                        nullValue=NULL_INT,
+                        data=image
+                        if has_data
+                        else np.full(
+                            # Avoid overflow in all-missing statistics, the native writer still stores float32. The writer still stores float32 values.
+                            image.shape,
+                            NULL_INT,
+                            dtype="float64",
+                        ),
+                    )
+                    if not has_data:
+                        record.minDataValue = NULL_INT
+                        record.maxDataValue = NULL_INT
+                        record.meanDataValue = NULL_INT
+                    status = target.put(record)
+                    if status != 0:
+                        raise OSError(
+                            f"DSS grid write failed with status {status}: {record.id}"
+                        )
+                    logger.info(f"Writing DSS timestep {timestep + 1}/{len(dates)}")
+            temporary_path.chmod(0o644)
+            temporary_path.replace(output_file)
+        except Exception:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            raise
+        logger.info(f"Wrote HMS results to {output_file!r} as {metadata['name']!r}")
+        return output_file
+
     def _s2_write_coordinates(
         self,
         target: netCDF4.Dataset,
@@ -789,10 +973,11 @@ class HMSResultsDelinGrid:
         values: np.ndarray,
         fill_value: float,
         unit_conversion: float,
+        output_format: str = "NetCDF",
     ) -> None:
         """NOTE: updates ``cell`` in-place. Map one timestep's valid results into the reusable cell-value buffer."""
         if (timestep + 1) % 5 == 0 or timestep == 0 or timestep == steps - 1:
-            logger.info(f"Writing NetCDF timestep {timestep + 1}/{steps}")
+            logger.info(f"Writing {output_format} timestep {timestep + 1}/{steps}")
         values.fill(fill_value)
         for dataset, indices, missing in datasets:
             row = dataset[timestep, :]

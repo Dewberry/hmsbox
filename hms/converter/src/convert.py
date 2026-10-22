@@ -7,6 +7,7 @@ from src.hms_results_delin_grid import (
     DEFAULT_CHUNK_PX,
     DEFAULT_CHUNK_TIME,
     HMS_RESULTS_VAR_METADATA,
+    SQUARIFY_WARNING,
     HMSResultsDelinGrid,
 )
 from src.logging import setup_json_logging
@@ -103,19 +104,22 @@ def parquet_to_dss_cmd(args) -> int:
 
 def hms_results_to_delin_grid_cmd(args) -> int:
     """Handle hms-results-to-delin-grid Stage 1 and Stage 2."""
-    if args.stage == 2 and args.hms_results_var is None:
-        logger.error("--hms-results-var is required for Stage 2")
-        return 1
-    if not Path(args.hms_results_file).exists():
-        logger.error(f"Input file not found: {args.hms_results_file}")
-        return 1
+    if args.squarify is not None:
+        logger.warning(SQUARIFY_WARNING)
     try:
+        if args.stage == 2 and args.hms_results_var is None:
+            logger.error("--hms-results-var is required for Stage 2")
+            return 1
+        if not Path(args.hms_results_file).exists():
+            logger.error(f"Input file not found: {args.hms_results_file}")
+            return 1
         delin = HMSResultsDelinGrid(
             args.hms_results_file,
             args.hms_disc_file,
             match_raster=args.match_raster,
             chunk_time=args.chunk_time,
             chunk_px=args.chunk_px,
+            squarify=args.squarify,
         )
         if args.stage == 1:
             delin.stage_1(args.output)
@@ -127,6 +131,9 @@ def hms_results_to_delin_grid_cmd(args) -> int:
             f"Stage {args.stage} failed: input={args.hms_results_file} error={e}"
         )
         return 1
+    finally:
+        if args.squarify is not None:
+            logger.warning(SQUARIFY_WARNING)
 
 
 def main() -> int:
@@ -279,7 +286,7 @@ def _main_impl() -> int:
     )
     delin.add_argument(
         "output",
-        help="For Stage 1, this is the output directory.  For Stage 2, this is the output NetCDF file.",
+        help="For Stage 1, this is the output directory. For Stage 2, this is the output .nc (NetCDF) or .dss (HEC-DSS) file.",
     )
     raster_mode = delin.add_mutually_exclusive_group(required=True)
     raster_mode.add_argument(
@@ -290,6 +297,12 @@ def _main_impl() -> int:
     raster_mode.add_argument(
         "--match-raster",
         help="Use an existing north-up, unrotated raster to define output pixel resolution and alignment. Output extent is adjusted to minimally cover the discretization polygons, while preserving pixel snapping. CRS must be equivalent to that of the discretization polygons. Filepath or GDAL /vsi*/ path. Pick either this or --infer-raster, but not both.",
+    )
+    delin.add_argument(
+        "--squarify",
+        type=float,
+        default=None,
+        help="Requires --match-raster. Sample the polygons directly onto a square grid of the given resolution in CRS units. The original matched grid's lower-left corner and CRS are retained. Grid dimensions are adjusted to cover the original extent, extending its top and right edges by less than one square pixel if necessary.",
     )
     delin.add_argument(
         "--hms-results-var",

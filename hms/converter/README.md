@@ -122,7 +122,7 @@ docker run -v $(pwd):/data hmsbox-converter:latest \
 
 ### hms-results-to-delin-grid
 
-Export HMS (polygon-based) results to timeseries NetCDF grid, using the resolution and
+Export HMS (polygon-based) results to timeseries NetCDF or HEC-DSS grid, using the resolution and
 alignment of a provided explicit "match raster" or a grid inferred from the staircase
 pattern of the HMS discretization polygons.
 
@@ -130,9 +130,11 @@ The output grid is sized to minimally cover the discretization polygons, while r
 
 Choose either `--infer-raster` or `--match-raster <PATH>` (required, mutually exclusive).
 
+Optional `--squarify SIZE` requires `--match-raster` and forces the output grid to be a square at the provided resolution (in CRS units), using the same LLC as would be used without this option.  The DSS grid format does not allow rectangular pixels.
+
 Stage 1 is optional and writes GIS files for review.
 
-Stage 2 performs the extraction to NetCDF.
+Stage 2 selects NetCDF or HEC-DSS from the output extension, which must be `.nc` or `.dss`. NetCDF chunk settings do not apply when writing DSS outputs.
 
 For implementation details, see docstring at: [hms/converter/src/hms_results_delin_grid.py](/hms/converter/src/hms_results_delin_grid.py)
 

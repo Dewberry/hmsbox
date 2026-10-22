@@ -1,13 +1,19 @@
-import json
 import argparse
 import sys
 from pathlib import Path
 
-from src.parquet import run
 from src.dss_parquet import parquet_to_dss
+from src.hms_results_delin_grid import (
+    DEFAULT_CHUNK_PX,
+    DEFAULT_CHUNK_TIME,
+    HMS_RESULTS_VAR_METADATA,
+    SQUARIFY_WARNING,
+    HMSResultsDelinGrid,
+)
 from src.logging import setup_json_logging
+from src.parquet import run
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 logger = setup_json_logging()
 
@@ -94,6 +100,40 @@ def parquet_to_dss_cmd(args) -> int:
             f"Conversion failed: input={input_path} output={output_path} error={e}"
         )
         return 1
+
+
+def hms_results_to_delin_grid_cmd(args) -> int:
+    """Handle hms-results-to-delin-grid Stage 1 and Stage 2."""
+    if args.squarify is not None:
+        logger.warning(SQUARIFY_WARNING)
+    try:
+        if args.stage == 2 and args.hms_results_var is None:
+            logger.error("--hms-results-var is required for Stage 2")
+            return 1
+        if not Path(args.hms_results_file).exists():
+            logger.error(f"Input file not found: {args.hms_results_file}")
+            return 1
+        delin = HMSResultsDelinGrid(
+            args.hms_results_file,
+            args.hms_disc_file,
+            match_raster=args.match_raster,
+            chunk_time=args.chunk_time,
+            chunk_px=args.chunk_px,
+            squarify=args.squarify,
+        )
+        if args.stage == 1:
+            delin.stage_1(args.output)
+        else:
+            delin.stage_2(args.output, args.hms_results_var)
+        return 0
+    except Exception as e:
+        logger.error(
+            f"Stage {args.stage} failed: input={args.hms_results_file} error={e}"
+        )
+        return 1
+    finally:
+        if args.squarify is not None:
+            logger.warning(SQUARIFY_WARNING)
 
 
 def main() -> int:
@@ -221,6 +261,71 @@ def _main_impl() -> int:
         help="Enable debug logging",
     )
     pq_to_dss.set_defaults(func=parquet_to_dss_cmd)
+
+    # HMS spatial results to delineation grid, Stage 1 and Stage 2
+    delin = subparsers.add_parser(
+        "hms-results-to-delin-grid",
+        help=HMSResultsDelinGrid.__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    delin.add_argument(
+        "-s",
+        "--stage",
+        type=int,
+        choices=[1, 2],
+        required=True,
+        help="See parser help. Stage 1 produces review files and may be skipped.",
+    )
+    delin.add_argument(
+        "hms_results_file",
+        help="Existing HMS results file, e.g. results/RUN_Forecast.h5.",
+    )
+    delin.add_argument(
+        "hms_disc_file",
+        help="Existing file containing the HMS polygon layers 'discretization' and 'subbasin2d', e.g. Forecast.sqlite. Filepath or GDAL /vsi*/ path.",
+    )
+    delin.add_argument(
+        "output",
+        help="For Stage 1, this is the output directory. For Stage 2, this is the output .nc (NetCDF) or .dss (HEC-DSS) file.",
+    )
+    raster_mode = delin.add_mutually_exclusive_group(required=True)
+    raster_mode.add_argument(
+        "--infer-raster",
+        action="store_true",
+        help="Infer grid alignment and resolution from the discretization polygons' staircase pattern (commonly SHG x Subbasins). Pick either this or --match-raster, but not both.",
+    )
+    raster_mode.add_argument(
+        "--match-raster",
+        help="Use an existing north-up, unrotated raster to define output pixel resolution and alignment. Output extent is adjusted to minimally cover the discretization polygons, while preserving pixel snapping. CRS must be equivalent to that of the discretization polygons. Filepath or GDAL /vsi*/ path. Pick either this or --infer-raster, but not both.",
+    )
+    delin.add_argument(
+        "--squarify",
+        type=float,
+        default=None,
+        help="Requires --match-raster. Sample the polygons directly onto a square grid of the given resolution in CRS units. The original matched grid's lower-left corner and CRS are retained. Grid dimensions are adjusted to cover the original extent, extending its top and right edges by less than one square pixel if necessary.",
+    )
+    delin.add_argument(
+        "--hms-results-var",
+        choices=HMS_RESULTS_VAR_METADATA.keys(),
+        default=None,
+        help="HMS results variable to export. Required for Stage 2. Unused by Stage 1. Example: 'Incremental Excess'.",
+    )
+    delin.add_argument(
+        "--chunk-time",
+        type=int,
+        default=DEFAULT_CHUNK_TIME,
+        help=f"NetCDF chunk size for time dimension, in units of number of timesteps. Default: {DEFAULT_CHUNK_TIME}. Affects Stage 2 only.",
+    )
+    delin.add_argument(
+        "--chunk-px",
+        type=int,
+        default=DEFAULT_CHUNK_PX,
+        help=f"NetCDF chunk size for spatial dimension, in units of number of pixels. Default: {DEFAULT_CHUNK_PX}. Affects Stage 2 only.",
+    )
+    delin.add_argument(
+        "-d", "--debug", action="store_true", help="Enable debug logging."
+    )
+    delin.set_defaults(func=hms_results_to_delin_grid_cmd)
 
     # Support legacy mode for backwards compatibility
     args = parser.parse_args()

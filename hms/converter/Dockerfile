@@ -9,6 +9,9 @@ LABEL org.opencontainers.image.title="HEC-HMS DSS Converter" \
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# libexpat1 needed for rasterio
+RUN apt-get update && apt-get install -y --no-install-recommends libexpat1 && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./

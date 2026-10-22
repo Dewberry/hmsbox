@@ -734,6 +734,7 @@ class HMSResultsDelinGrid:
                         values,
                         data._FillValue,
                         unit_conversion,
+                        output_format="NetCDF",
                     )
                     data[timestep, :, :] = values[cell]
                 logger.info("Finalizing NetCDF file")
@@ -973,7 +974,7 @@ class HMSResultsDelinGrid:
         values: np.ndarray,
         fill_value: float,
         unit_conversion: float,
-        output_format: str = "NetCDF",
+        output_format: str,
     ) -> None:
         """NOTE: updates ``cell`` in-place. Map one timestep's valid results into the reusable cell-value buffer."""
         if (timestep + 1) % 5 == 0 or timestep == 0 or timestep == steps - 1:
